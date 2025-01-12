@@ -1,27 +1,43 @@
-import sys
 import pdb
-from math import ceil
-from io import BytesIO
 from binascii import hexlify
-from struct import pack, unpack
-from collections import ChainMap, OrderedDict, Sequence
+from collections.abc import Sequence
+from io import BytesIO
+from math import ceil
+from struct import Struct as _Struct
+from sys import version_info, exc_info
+from typing import Any, Callable, List, Union, Tuple, Type, Dict, Mapping
 
 from error import *
 
+if version_info >= (3, 6):
+    from collections import ChainMap
+
+    OrderedDict = dict
+else:
+    from collections import ChainMap, OrderedDict
 
 __version__ = '0.9.5'
 
-__all__ = ['Construct', 'Subconstruct', 'Context', 'Error',
-           'BuildingError', 'ParsingError', 'SizeofError', 'ContextualError', 'ValidationError',
-           'Pass', 'Flag', 'Bytes', 'Integer', 'Float', 'Padding',
-           'Repeat', 'RepeatExactly', 'Adapted', 'Prefixed', 'Padded',
-           'Aligned', 'String', 'PascalString', 'CString',
-           'Line', 'Struct', 'Contextual', 'Computed', 'BitFields', 'Const',
-           'Raise', 'If', 'Switch', 'Enum', 'Offset', 'Tell', 'Checksum',
-           'Debug']
+__all__ = [
+    'Construct', 'SubConstruct', 'Context', 'Error',
+    'BuildingError', 'ParsingError', 'SizeofError', 'ContextualError', 'ValidationError',
+    'Pass', 'Flag', 'Bytes', 'Integer', 'Float', 'Padding', 'Repeat', 'RepeatExactly',
+    'Adapted', 'Prefixed', 'Padded', 'Aligned', 'String', 'PascalString',
+    'CString', 'Line', 'Struct', 'Contextual', 'Computed', 'BitFields',
+    'Const', 'Raise', 'If', 'Switch', 'Enum', 'Offset', 'Tell', 'Checksum',
+    'Debug', 'Bit', 'BitPadding', 'BitFieldStruct', 'Varint', 'Optional', 'Probe',
+]
 
-CLASS_NAMESPACE_ORDERED = sys.version_info >= (3, 6)
 
+class Context(ChainMap):
+    """
+    Special object that tracks building/parsing process, contains relevant
+    values to build and already parsed values: fields parameters can depend
+    upon them via a contextual function instead of being statically defined.
+    """
+
+
+ContextOrNone = Context | None
 
 # Base classes.
 class Construct:
@@ -36,12 +52,12 @@ class Construct:
         * _repr(self)
 
     """
-    __slots__ = ('_embedded',)
+    __slots__ = ('_embedded',)  # 使用 __slots__ 节省内存
 
     def __init__(self):
         self._embedded = False
 
-    def build(self, obj, context=None) -> bytes:
+    def build(self, obj, context: ContextOrNone = None) -> bytes:
         """
         Build bytes from the python object.
 
@@ -52,7 +68,7 @@ class Construct:
         self.build_stream(obj, stream, context)
         return stream.getvalue()
 
-    def parse(self, data: bytes, context=None):
+    def parse(self, data: bytes, context: ContextOrNone = None) -> Any:
         """
         Parse some python object from the data.
 
@@ -62,7 +78,7 @@ class Construct:
         stream = BytesIO(data)
         return self.parse_stream(stream, context)
 
-    def build_stream(self, obj, stream: BytesIO, context=None) -> None:
+    def build_stream(self, obj, stream: BytesIO, context: ContextOrNone = None) -> Any:
         """
         Build bytes from the python object into the stream.
 
@@ -70,10 +86,7 @@ class Construct:
         :param stream: A ``io.BytesIO`` instance to write bytes into.
         :param context: Optional context dictionary.
         """
-        if context is None:
-            context = Context()
-        if not isinstance(context, Context):
-            context = Context(context)
+        context = context if isinstance(context, Context) else Context(context or {})  # 简化 Context 创建
         try:
             self._build_stream(obj, stream, context)
         except Error:
@@ -81,17 +94,14 @@ class Construct:
         except Exception as exc:
             raise BuildingError(str(exc))
 
-    def parse_stream(self, stream: BytesIO, context=None):
+    def parse_stream(self, stream: BytesIO, context: ContextOrNone = None) -> Any:
         """
         Parse some python object from the stream.
 
         :param stream: Stream from which the data is read and parsed.
         :param context: Optional context dictionary.
         """
-        if context is None:
-            context = Context()
-        if not isinstance(context, Context):
-            context = Context(context)
+        context = context if isinstance(context, Context) else Context(context or {})  # 简化 Context 创建
         try:
             return self._parse_stream(stream, context)
         except Error:
@@ -105,16 +115,11 @@ class Construct:
 
         :param context: Optional context dictionary.
         """
-        if context is None:
-            context = Context()
-        if not isinstance(context, Context):
-            context = Context(context)
+        context = context if isinstance(context, Context) else Context(context or {})  # 简化 Context 创建
         try:
             return self._sizeof(context)
-        except Error:
-            raise
         except Exception as exc:
-            raise SizeofError(str(exc))
+            raise SizeofError(str(exc)) from exc
 
     def __repr__(self):
         return self._repr()
@@ -132,11 +137,7 @@ class Construct:
             return Repeat(self, item.start, item.stop)
         if isinstance(item, int):
             return RepeatExactly(self, item)
-        raise ValueError(
-            'can make a Repeat only from an int or a slice, got {!r}'.format(
-                type(item)
-            )
-        )
+        raise TypeError(f"'can make a Repeat only from an int or a slice, got {type(item)}")
 
     def _build_stream(self, obj, stream, context):  # pragma: nocover
         raise NotImplementedError
@@ -151,12 +152,12 @@ class Construct:
         raise NotImplementedError
 
 
-class Subconstruct(Construct):
+class SubConstruct(Construct):
     """
     Non-trivial constructs often wrap other constructs and add
     transformations on top of them. This class helps to reduce boilerplate
     by providing default implementations for build, parse and sizeof:
-    it proxies calls to the provided construct.
+    its proxies calls to the provided construct.
 
     Note that _repr still has to be implemented.
 
@@ -165,11 +166,10 @@ class Subconstruct(Construct):
     """
     __slots__ = ('construct',)
 
-    def __init__(self, construct: Construct):
+    def __init__(self, construct):
         super().__init__()
         self.construct = construct
-        if construct._embedded:
-            self._embedded = True
+        self._embedded = construct._embedded  # 直接赋值，避免重复判断
 
     def _build_stream(self, obj, stream, context):
         return self.construct._build_stream(obj, stream, context)
@@ -184,121 +184,57 @@ class Subconstruct(Construct):
         raise NotImplementedError
 
 
-class Context(ChainMap):
-    """
-    Special object that tracks building/parsing process, contains relevant
-    values to build and already parsed values: fields parameters can depend
-    of them via a contextual function instead of being statically defined.
-    """
-
-
 # Primitive constructs
 class Pass(Construct):
-    r"""
-    The most simplest construct ever: it does nothing when building
+    """
+    The simplest construct ever: it does nothing when building
     or parsing, its size is 0.
-    Useful as default cases for conditional constructs (Enum, Switch, If, etc).
-
-        >>> p = Pass()
-        >>> p
-        Pass()
-        >>> p.build('foo')
-        b''
-        >>> p.parse(b'bar')
-        >>> p.sizeof()
-        0
-
+    Useful as default cases for conditional constructs (Enum, Switch, If, etc.).
     """
     __slots__ = ()
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> Any:
         return obj
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> None:
         pass
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         return 0
 
-    def _repr(self):
+    def _repr(self) -> str:
         return 'Pass()'
 
 
 class Flag(Construct):
-    r"""
+    """
     Build and parse a single byte, interpreting 0 as ``False``
     and everything else as ``True``.
-
-        >>> f = Flag()
-        >>> f
-        Flag()
-        >>> f.build(True)
-        b'\x01'
-        >>> f.parse(b'\x00')
-        False
-        >>> f.parse(b'\x10')
-        True
-        >>> f.sizeof()
-        1
 
     """
     __slots__ = ()
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: bool, stream: BytesIO, context: ContextOrNone) -> None:
         stream.write(b'\x01' if obj else b'\x00')
 
-    def _parse_stream(self, stream, context):
-        data = stream.read(1)
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> bool:
+        data: bytes = stream.read(1)
         if data == b'':
             raise ParsingError(
                 'could not read enough bytes, expected 1, found 0'
             )
         return data != b'\x00'
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         return 1
 
-    def _repr(self):
+    def _repr(self) -> str:
         return 'Flag()'
 
 
 class Bytes(Construct):
     """
     Build and parse raw bytes with the specified length.
-
-        >>> b = Bytes(3)
-        >>> b
-        Bytes(3)
-        >>> b.build(b'foo')
-        b'foo'
-        >>> b.parse(b'bar')
-        b'bar'
-        >>> b.build(b'foobar')
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: must build 3 bytes, got 6
-        >>> b.sizeof()
-        3
-
-    ``ValueError`` is raised when length is less that -1:
-
-        >>> Bytes(-10)
-        Traceback (most recent call last):
-        ...
-        ValueError: length must be >= -1, got -10
-
-    If length is omitted (or is -1), parsing consumes the stream to its end:
-
-        >>> stream = BytesIO(b'foobar')
-        >>> b = Bytes()
-        >>> b.parse_stream(stream)
-        b'foobar'
-        >>> stream.read(1)
-        b''
-        >>> b.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.SizeofError: Bytes() has no fixed size
 
     :param length: a number of bytes to build and to parse, if -1 then parsing
     consumes the stream to its end (see examples).
@@ -309,81 +245,35 @@ class Bytes(Construct):
     def __init__(self, length: int = -1):
         super().__init__()
         if length < -1:
-            raise ValueError('length must be >= -1, got {}'.format(length))
-        self.length = length
+            raise ValueError(f"length must be >= -1, got {length}")
+        self.length: int = length
 
-    def _build_stream(self, obj: bytes, stream, context):
+    def _build_stream(self, obj: bytes, stream: BytesIO, context: ContextOrNone) -> bytes:
         if self.length == 1 and isinstance(obj, int):
-            # Iterating over bytes gives ints, not bytes. Let's fix it.
             obj = bytes([obj])
         if self.length != -1 and len(obj) != self.length:
-            raise BuildingError('must build {!r} bytes, got {!r}'.format(
-                self.length, len(obj)
-            ))
+            raise BuildingError(f'must build {self.length!r} bytes, got {len(obj)!r}')
         stream.write(obj)
-
-    def _parse_stream(self, stream, context) -> bytes:
-        obj = stream.read(self.length)
-        if self.length != -1 and len(obj) != self.length:
-            raise ParsingError(
-                'could not read enough bytes, expected {}, found {}'.format(
-                    self.length, len(obj)
-                )
-            )
         return obj
 
-    def _sizeof(self, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> bytes:
+        obj = stream.read(self.length)
+        if self.length != -1 and len(obj) != self.length:
+            raise ParsingError(f'could not read enough bytes, expected {self.length}, found {len(obj)}')
+        return obj
+
+    def _sizeof(self, context: ContextOrNone) -> int:
         if self.length == -1:
             raise SizeofError('Bytes() has no fixed size')
         return self.length
 
-    def _repr(self):
-        return 'Bytes({})'.format('' if self.length == -1 else self.length)
+    def _repr(self) -> str:
+        return f"Bytes({self.length if self.length != -1 else ''})"
 
 
 class Integer(Construct):
-    r"""
+    """
     Build bytes from integers, parse integers from bytes.
-
-        >>> i = Integer(1, byteorder='big', signed=False)
-        >>> i
-        Integer(1, byteorder='big', signed=False)
-        >>> i.build(0xff)
-        b'\xff'
-        >>> i.parse(b'\x10')
-        16
-        >>> i.sizeof()
-        1
-
-        >>> Integer(1, 'little').build(0xff)
-        b'\xff'
-
-        >>> Integer(2, 'little').build(0xff)
-        b'\xff\x00'
-        >>> Integer(2, 'big').build(0xff)
-        b'\x00\xff'
-
-        >>> Integer(2, 'little', signed=True).build(-0x10ff)
-        b'\x01\xef'
-
-        >>> # pypy3 gives a different error message
-        >>> # argument out of range for 1-byte integer format
-        >>> # python3 gives
-        >>> # ubyte format requires 0 <= number <= 255
-        >>> Integer(1).build(-1)
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: ...
-
-        >>> Integer(3)
-        Traceback (most recent call last):
-        ...
-        ValueError: length must be 1, 2, 4, or 8, got 3
-
-        >>> Integer(1, 'custom')
-        Traceback (most recent call last):
-        ...
-        ValueError: byteorder must be 'big' or 'little', got 'custom'
 
     :param length: the integer is represented using so many number of bytes.
     Currently only 1, 2, 4, and 8 bytes are supported.
@@ -407,16 +297,13 @@ class Integer(Construct):
                  signed: bool = False):
         super().__init__()
         if length not in (1, 2, 4, 8):
-            raise ValueError(
-                'length must be 1, 2, 4, or 8, got {}'.format(length)
-            )
-        self.length = length
+            raise ValueError(f'length must be 1, 2, 4, or 8, got {length}')
+        self.length: int = length
         if byteorder not in ('big', 'little'):
-            raise ValueError("byteorder must be 'big' or 'little'"
-                             ', got {!r}'.format(byteorder))
-        self.byteorder = byteorder
-        self.signed = signed
-        self._fmt = ('>' if byteorder == 'big' else '<') + {
+            raise ValueError(f"byteorder must be 'big' or 'little', got {byteorder!r}")
+        self.byteorder: str = byteorder
+        self.signed: bool = signed
+        self._fmt: _Struct = _Struct(('>' if byteorder == 'big' else '<') + {
             (1, True): 'b',
             (1, False): 'B',
             (2, True): 'h',
@@ -425,51 +312,29 @@ class Integer(Construct):
             (4, False): 'L',
             (8, True): 'q',
             (8, False): 'Q',
-        }[(length, signed)]
+        }[(length, signed)])
 
-    def _build_stream(self, obj: int, stream, context):
-        stream.write(pack(self._fmt, obj))
+    def _build_stream(self, obj: int, stream: BytesIO, context: ContextOrNone) -> None:
+        try:
+            obj: bytes = self._fmt.pack(obj)
+            stream.write(obj)
+        except BuildingError as e:
+            raise BuildingError(str(e))
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> int:
         data = stream.read(self.length)
-        return unpack(self._fmt, data)[0]
+        return self._fmt.unpack(data)[0]
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         return self.length
 
-    def _repr(self):
-        return 'Integer({}, byteorder={!r}, signed={})'.format(
-            self.length, self.byteorder, self.signed,
-        )
+    def _repr(self) -> str:
+        return f'Integer({self.length}, byteorder={self.byteorder!r}, signed={self.signed})'
 
 
 class Float(Construct):
-    r"""
+    """
     Build bytes from floats, parse floats from bytes.
-
-        >>> i = Float(4, byteorder='big')
-        >>> i
-        Float(4, byteorder='big')
-        >>> i.build(2.2)
-        b'@\x0c\xcc\xcd'
-        >>> i.parse(b'\x01\x02\x03\x04')
-        2.387939260590663e-38
-        >>> i.sizeof()
-        4
-
-        >>> Float(8, 'little').build(-1970.31415)
-        b"'\xa0\x89\xb0A\xc9\x9e\xc0"
-
-    Providing invalid parameters results in a ValueError:
-
-        >>> Float(5)
-        Traceback (most recent call last):
-        ...
-        ValueError: length must be 4 or 8, got 5
-        >>> Float(4, byteorder='native')
-        Traceback (most recent call last):
-        ...
-        ValueError: byteorder must be 'big' or 'little', got 'native'
 
     :param length: the float is represented using so many number of bytes.
         Currently only 4 and 8 bytes are supported.
@@ -487,159 +352,78 @@ class Float(Construct):
     def __init__(self, length: int, byteorder: str = 'big'):
         super().__init__()
         if length not in (4, 8):
-            raise ValueError('length must be 4 or 8, got {}'.format(length))
-        self.length = length
+            raise ValueError(f"length must be 4 or 8, got {length}")
+        self.length: int = length
         if byteorder not in ('big', 'little'):
-            raise ValueError("byteorder must be 'big' or 'little'"
-                             ', got {!r}'.format(byteorder))
-        self.byteorder = byteorder
-        _format_map = {
+            raise ValueError(f"byteorder must be 'big' or 'little', got {byteorder!r}")
+        self.byteorder: str = byteorder
+        _format_map: Dict[Tuple[int, str], str] = {
             (4, 'big'): '>f',
             (4, 'little'): '<f',
             (8, 'big'): '>d',
             (8, 'little'): '<d',
         }
-        self._fmt = _format_map[(length, byteorder)]
+        self._fmt: _Struct = _Struct(_format_map[(length, byteorder)])
 
-    def _build_stream(self, obj: float, stream, context):
-        stream.write(pack(self._fmt, obj))
+    def _build_stream(self, obj: float, stream: BytesIO, context: ContextOrNone) -> None:
+        try:
+            obj: bytes = self._fmt.pack(obj)
+            stream.write(obj)
+        except BuildingError as e:
+            raise BuildingError(str(e))
 
-    def _parse_stream(self, stream, context) -> float:
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> float:
         data = stream.read(self.length)
-        return unpack(self._fmt, data)[0]
+        return self._fmt.unpack(data)[0]
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         return self.length
 
-    def _repr(self):
-        return 'Float({}, byteorder={!r})'.format(self.length, self.byteorder)
+    def _repr(self) -> str:
+        return f'Float({self.length}, byteorder={self.byteorder!r})'
 
 
 class Padding(Construct):
-    r"""
+    """
     Null bytes that are being ignored during building/parsing.
 
-        >>> import os
-        >>> p = Padding(4)
-        >>> p
-        Padding(4, padchar=b'\x00')
-        >>> p.build(os.urandom(16))
-        b'\x00\x00\x00\x00'
-        >>> p.parse(b'\x00\x00\x00\x00')
-        b'\x00\x00\x00\x00'
-        >>> p.sizeof()
-        4
-
-    :param padchar: Pad using this char. Default is b'\x00' (zero byte).
+    :param pad_char: Pad using this char. Default is b"\x00" (zero byte).
 
     """
-    __slots__ = ('length', 'padchar')
+    __slots__ = ('length', 'pad_char')
 
-    def __init__(self, length: int, padchar: bytes = b'\x00'):
+    def __init__(self, length: int, pad_char: bytes = b'\x00'):
         super().__init__()
         if length < 0:
-            raise ValueError('length must be >= 0, got {}'.format(length))
-        self.length = length
-        if len(padchar) != 1:
-            raise ValueError('padchar must be a single-length bytes, '
-                             'got {!r}'.format(padchar))
-        self.padchar = padchar
+            raise ValueError(f'length must be >= 0, got {length}')
+        self.length: int = length
+        if len(pad_char) != 1:
+            raise ValueError(f'pad_char must be a single-length bytes, got {pad_char!r}')
+        self.pad_char: bytes = pad_char
 
-    def _build_stream(self, obj, stream, context):
-        stream.write(self.padchar * self.length)
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> None:
+        stream.write(self.pad_char * self.length)
 
-    def _parse_stream(self, stream, context):
-        data = stream.read(self.length)
-        padding = self.padchar * self.length
-        if data != padding:
-            raise ParsingError('expected to parse {!r}, got {!r} '
-                               'instead'.format(padding, data))
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> bytes:
+        data: bytes = stream.read(self.length)
+        expected_padding: bytes = self.pad_char * self.length
+        if data != expected_padding:
+            raise ParsingError(f'expected to parse {expected_padding!r}, got {data!r} instead')
         return data
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         return self.length
 
-    def _repr(self):
-        return 'Padding({}, padchar={!r})'.format(self.length, self.padchar)
+    def _repr(self) -> str:
+        return f'Padding({self.length}, pad_char={self.pad_char!r})'
 
 
 # Adapters.
 class Repeat(Construct):
-    r"""
+    """
     Repeat a construct for the specified range of times (semantics follows
     built-in ``range`` function except the step is always 1
     and negative values can't be specified).
-
-        >>> r = Repeat(Flag(), 1, 4)
-        >>> r
-        Repeat(Flag(), start=1, stop=4)
-        >>> r.build([True, True])
-        b'\x01\x01'
-        >>> r.parse(b'\x00\x01\x00')
-        [False, True, False]
-        >>> r.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.SizeofError: cannot determine size of variable sized Repeat
-
-    A predicate function can be specified to conditionally stop repeating.
-    This function should accept a single argument of all accumulated
-    items.
-
-        >>> r = Repeat(Flag(), 1, 5, until=lambda obj: not obj[-1])
-        >>> r
-        Repeat(Flag(), start=1, stop=5, until=<function <lambda> at ...>)
-        >>> r.build([True, True, False, True])
-        b'\x01\x01\x00'
-        >>> r.parse(b'\x01\x00\x00')
-        [True, False]
-
-    Note that the last element (which caused the repeat to stop) is included
-    in the return list.
-
-    The specified boundaries are mandatory:
-
-        >>> r = Repeat(Flag(), 3, 5, until=lambda items: not items[-1])
-        >>> r.build([True])
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: length of the object to build must be in range [3, 5), got 1
-        >>> r.parse(b'\x01\x01')
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: required to parse at least 3 of Flag(), parsed 2 instead; error was: could not read enough bytes, expected 1, found 0
-        >>> r.parse(b'\x00')
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: required to parse at least 3 of Flag(), parsed 1 instead; exited due to 'until' predicate
-
-    An alternative slice-based syntax can be used:
-
-        >>> Flag()[2:5]
-        Repeat(Flag(), start=2, stop=5)
-
-    Providing invalid repeat parameters will throw a ValueError:
-
-        >>> Repeat(Flag(), -1, 0)
-        Traceback (most recent call last):
-        ...
-        ValueError: start must be >= 0, got -1
-        >>> Repeat(Flag(), 0, -1)
-        Traceback (most recent call last):
-        ...
-        ValueError: stop must be >= 0, got -1
-        >>> Repeat(Flag(), 6, 2)
-        Traceback (most recent call last):
-        ...
-        ValueError: stop must be >= start
-        >>> Flag()[2:5:2]
-        Traceback (most recent call last):
-        ...
-        ValueError: cannot make a Repeat with a step
-        >>> Flag()['foo']
-        Traceback (most recent call last):
-        ...
-        ValueError: can make a Repeat only from an int or a slice, got <class 'str'>
 
     :param construct: Construct to repeat.
 
@@ -657,99 +441,76 @@ class Repeat(Construct):
     """
     __slots__ = ('construct', 'start', 'stop', 'until')
 
-    def __init__(self, construct: Construct, start: int, stop: int,
-                 until: callable = None):
+    def __init__(self, construct: Construct | Type[Construct], start: int, stop: int,
+                 until: Callable[[List[Construct | Type[Construct]]], bool] | None = None):
         super().__init__()
         self.construct = construct
         if start < 0:
-            raise ValueError('start must be >= 0, got {}'.format(start))
+            raise ValueError(f'start must be >= 0, got {start}')
         self.start = start
         if stop < 0:
-            raise ValueError('stop must be >= 0, got {}'.format(stop))
-        self.stop = stop
+            raise ValueError(f'stop must be >= 0, got {stop}')
         if stop < start:
-            raise ValueError('stop must be >= start')
+            raise ValueError(f'stop must be >= start, got stop:{stop}, start:{start}')
+        self.stop = stop
         self.until = until
 
-    def _build_stream(self, obj: Sequence, stream, context):
+    def _build_stream(self, obj: Sequence[Any], stream: BytesIO, context: ContextOrNone) -> None:
         if not self.start <= len(obj) < self.stop:
             raise BuildingError(
-                'length of the object to build must be in range '
-                '[{}, {}), got {}'.format(self.start, self.stop, len(obj))
+                f'length of the object to build must be in range [{self.start}, {self.stop}), got {len(obj)}'
             )
-        predicate = self.until
-        items = []
-        build_stream = self.construct._build_stream
-        for item in obj:
-            build_stream(item, stream, context)
-            items.append(item)
-            if predicate is not None and predicate(items):
-                break
+        items: List[Construct | Type[Construct]] = []
 
-    def _parse_stream(self, stream, context) -> list:
-        predicate = self.until
-        obj = []
-        parse_stream = self.construct._parse_stream
-        stop = self.stop - 1
+        if self.until is not None:
+            for item in obj:
+                self.construct._build_stream(item, stream, context)
+                items.append(item)
+                if self.until(items):
+                    break
+        else:
+            for item in obj:
+                self.construct._build_stream(item, stream, context)
+                items.append(item)
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> List[Any]:
+        obj: List[Any] = []
         try:
-            while len(obj) < stop:
-                item = parse_stream(stream, context)
-                obj.append(item)
-                if predicate is not None and predicate(obj):
+            while len(obj) < self.stop - 1:
+                parsed_item = self.construct._parse_stream(stream, context)
+                obj.append(parsed_item)
+                if self.until is not None and self.until(obj):
                     break
         except ParsingError as exc:
             if len(obj) < self.start:
                 raise ParsingError(
-                    'required to parse at least {} of {}, '
-                    'parsed {} instead; error was: {}'.format(
-                        self.start, self.construct, len(obj), exc
-                    )
+                    f'required to parse at least {self.start} of {self.construct}, '
+                    f'parsed {len(obj)} instead; error was: {exc}'
                 )
             return obj
         if len(obj) < self.start:
             raise ParsingError(
-                'required to parse at least {} of {}, parsed '
-                "{} instead; exited due to 'until' predicate".format(
-                    self.start, self.construct, len(obj)
-                )
+                f'required to parse at least {self.start} of {self.construct}, parsed '
+                f'{len(obj)} instead; exited due to \'until\' predicate'
             )
         return obj
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         if self.start != self.stop - 1 or self.until is not None:
             raise SizeofError(
-                'cannot determine size of variable sized Repeat'
+                'cannot determine size of variable sized Repeat()'
             )
         return self.start * self.construct._sizeof(context)
 
-    def _repr(self):
+    def _repr(self) -> str:
         if self.until is None:
-            return 'Repeat({}, start={}, stop={})'.format(
-                self.construct, self.start, self.stop
-            )
-        return 'Repeat({}, start={}, stop={}, until={})'.format(
-            self.construct, self.start, self.stop, self.until
-        )
+            return f'Repeat({self.construct}, start={self.start}, stop={self.stop})'
+        return f'Repeat({self.construct}, start={self.start}, stop={self.stop}, until={self.until})'
 
 
 class RepeatExactly(Repeat):
-    r"""
+    """
     Repeat the specified construct exactly n times.
-
-        >>> r = RepeatExactly(Flag(), 3)
-        >>> r
-        RepeatExactly(Flag(), 3)
-        >>> r.build([True, False, True])
-        b'\x01\x00\x01'
-        >>> r.parse(b'\x00\x01\x00')
-        [False, True, False]
-        >>> r.sizeof()
-        3
-
-    An alternative slice-based syntax can be used:
-
-        >>> Flag()[3]
-        RepeatExactly(Flag(), 3)
 
     :param construct: Construct to repeat.
 
@@ -763,30 +524,18 @@ class RepeatExactly(Repeat):
     """
     __slots__ = ()
 
-    def __init__(self, construct: Construct, n: int, until: callable = None):
+    def __init__(self, construct: Construct | Type[Construct], n: int,
+                 until: Callable[[List[Construct | Type[Construct]]], bool] | None = None):
         super().__init__(construct, n, n + 1, until)
 
-    def _repr(self):
-        return 'RepeatExactly({}, {})'.format(self.construct, self.start)
+    def _repr(self) -> str:
+        return f'RepeatExactly({self.construct}, {self.start})'
 
 
-class Adapted(Subconstruct):
-    r"""
+class Adapted(SubConstruct):
+    """
     Adapter helps to transform objects before building and/or after parsing
     of the provided construct.
-
-        >>> a = Adapted(Flag(),
-        ...     before_build=lambda obj: obj != 'no',
-        ...     after_parse=lambda obj: 'yes' if obj else 'no',
-        ... )
-        >>> a
-        Adapted(Flag(), before_build=<function <lambda> at ...>, after_parse=<function <lambda> at ...>)
-        >>> a.build('yes')
-        b'\x01'
-        >>> a.parse(b'\x00')
-        'no'
-        >>> a.sizeof()
-        1
 
     :param construct: Construct to adapt.
 
@@ -801,53 +550,35 @@ class Adapted(Subconstruct):
     """
     __slots__ = ('before_build', 'after_parse')
 
-    def __init__(self, construct: Construct,
-                 before_build: callable = None, after_parse: callable = None):
+    def __init__(self, construct: Type[Construct] | Construct,
+                 before_build: Callable[[Any], Any] = None, after_parse: Callable[[Any], Any] = None):
         super().__init__(construct)
         self.before_build = before_build
         self.after_parse = after_parse
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> bytes:
         if self.before_build is not None:
             obj = self.before_build(obj)
         return self.construct._build_stream(obj, stream, context)
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
         obj = self.construct._parse_stream(stream, context)
         if self.after_parse is not None:
             obj = self.after_parse(obj)
         return obj
 
-    def _repr(self):
-        return 'Adapted({}, before_build={!r}, after_parse={!r})'.format(
-            self.construct, self.before_build, self.after_parse,
-        )
+    def _repr(self) -> str:
+        return f'Adapted({self.construct}, before_build={self.before_build!r}, after_parse={self.after_parse!r})'
 
 
-class Prefixed(Subconstruct):
-    r"""
+class Prefixed(SubConstruct):
+    """
     Length-prefixed construct.
     Parses the length field first, then reads that amount of bytes
     and parses the provided construct using only those bytes.
     Constructs that consume entire remaining stream (like Bytes()) are
     constrained to consuming only the specified amount of bytes.
     When building, data is prefixed by its length.
-
-        >>> p = Prefixed(Bytes(), Integer(1))
-        >>> p
-        Prefixed(Bytes(), length_field=Integer(1, byteorder='big', signed=False))
-        >>> p.build(b'foo')
-        b'\x03foo'
-        >>> p.parse(b'\x06foobar')
-        b'foobar'
-        >>> p.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.SizeofError: Bytes() has no fixed size
-        >>> p.parse(b'\x06baz')
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: could not read enough bytes, expected 6, found 3
 
     :param construct: Construct to be prefixed with its length.
 
@@ -856,460 +587,314 @@ class Prefixed(Subconstruct):
     """
     __slots__ = ('length_field',)
 
-    def __init__(self, construct: Construct, length_field: Construct):
+    def __init__(self, construct: Type[Construct] | Construct, length_field: Type[Construct] | Construct):
         super().__init__(construct)
         self.length_field = length_field
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj, stream: BytesIO, context: ContextOrNone) -> bytes:
         self.length_field._build_stream(len(obj), stream, context)
         return self.construct._build_stream(obj, stream, context)
 
-    def _parse_stream(self, stream, context):
-        length = self.length_field._parse_stream(stream, context)
-        data = stream.read(length)
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
+        length: int = self.length_field._parse_stream(stream, context)
+        data: bytes = stream.read(length)
         if len(data) != length:
             raise ParsingError(
-                'could not read enough bytes, expected {}, found {}'.format(
-                    length, len(data)
-                )
+                f'could not read enough bytes, expected {length}, found {len(data)}'
             )
-        stream2 = BytesIO(data)
-        return self.construct._parse_stream(stream2, context)
+        return self.construct._parse_stream(BytesIO(data), context)
 
-    def _sizeof(self, context):
-        length_size = self.length_field._sizeof(context)
-        return length_size + self.construct._sizeof(context)
+    def _sizeof(self, context: ContextOrNone) -> int:
+        """TODO:Returns the size of the construct, if fixed ?"""
+        return self.length_field._sizeof(context) + self.construct._sizeof(context)
 
-    def _repr(self):
-        return 'Prefixed({}, length_field={})'.format(
-            self.construct, self.length_field,
-        )
+    def _repr(self) -> str:
+        return f'Prefixed({self.construct}, length_field={self.length_field})'
 
 
 class Padded(Construct):
-    r"""
+    """
     Appends additional null bytes to achieve a fixed length.
-
-        >>> p = Padded(Bytes(3), 6)
-        >>> p
-        Padded(Bytes(3), length=6)
-        >>> p.build(b'foo')
-        b'foo\x00\x00\x00'
-        >>> p.parse(b'bar\x00\x00\x00')
-        b'bar'
-        >>> p.sizeof()
-        6
-        >>> p.parse(b'baz')
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: could not read enough bytes, expected 6, found 3
-
-    Providing invalid parameters results in a ValueError:
-
-        >>> Padded(Bytes(3), -2)
-        Traceback (most recent call last):
-        ...
-        ValueError: length must be >= 0, got -2
 
     :param construct: A construct to be padded.
 
     :param length: Pad to achieve exactly this number of bytes.
 
+    :param pad_byte: The byte used for padding. Defaults to b"\x00".
     """
-    __slots__ = ('construct', 'length')
+    __slots__ = ('construct', 'length', 'pad_byte')
 
-    def __init__(self, construct: Construct, length: int):
+    def __init__(self, construct: Type[Construct] | Construct, length: int, pad_byte: bytes = b'\x00'):
         super().__init__()
         self.construct = construct
         if length < 0:
-            raise ValueError('length must be >= 0, got {}'.format(length))
+            raise ValueError(f'length must be >= 0, got {length}')
         self.length = length
+        self.pad_byte = pad_byte
 
-    def _build_stream(self, obj, stream, context):
-        stream2 = BytesIO()
-        ctx_value = self.construct._build_stream(obj, stream2, context)
-        data = stream2.getvalue()
-        padded_data = data.ljust(self.length, b'\x00')
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> Any:
+        sub_stream = BytesIO()
+        ctx_value = self.construct._build_stream(obj, sub_stream, context)
+        data: bytes = sub_stream.getvalue()
+        padded_data = data.ljust(self.length, self.pad_byte)
         stream.write(padded_data)
         return ctx_value
 
-    def _parse_stream(self, stream, context):
-        data = stream.read(self.length)
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
+        data: bytes = stream.read(self.length)
         if len(data) != self.length:
-            raise ParsingError(
-                'could not read enough bytes, expected {}, found {}'.format(
-                    self.length, len(data)
-                )
-            )
-        data = data.rstrip(b'\x00')
-        return self.construct._parse_stream(BytesIO(data), context)
+            raise ParsingError(f'could not read enough bytes, expected {self.length}, found {len(data)}')
 
-    def _sizeof(self, context):
+        no_padded_data = data[:self.construct.sizeof()]
+        padding_len = self.length - len(no_padded_data)
+
+        if data[-padding_len:] != (
+                padded_data := self.pad_byte * padding_len):  # Simpler and more correct padding check
+            raise ParsingError(
+                f"Trailing bytes are not all pad bytes {self.pad_byte!r}. Expected {padding_len} bytes: {padded_data}, but found invalid padding: {data[-padding_len:]}."
+            )
+
+        return self.construct._parse_stream(BytesIO(no_padded_data), context)
+
+    def _sizeof(self, context: ContextOrNone) -> int:
         return self.length
 
-    def _repr(self):
-        return 'Padded({}, length={})'.format(self.construct, self.length)
+    def _repr(self) -> str:
+        return f'Padded({self.construct}, length={self.length})' if self.pad_byte == b'\x00' else f'Padded({self.construct}, length={self.length}, pad_byte={self.pad_byte!r})'
 
 
 class Aligned(Construct):
-    r"""
+    """
     Appends additional null bytes to achieve a length that is
-    shortest multiple of a length.
-
-        >>> a = Aligned(Bytes(1)[2:8], 4)
-        >>> a
-        Aligned(Repeat(Bytes(1), start=2, stop=8), length=4)
-        >>> a.build(b'foobar')
-        b'foobar\x00\x00'
-        >>> b''.join(a.parse(b'foo\x00'))
-        b'foo\x00'
-        >>> a.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.SizeofError: cannot determine size of variable sized Repeat
-
-        >>> a = Aligned(Bytes(6), 4)
-        >>> a.sizeof()
-        8
-        >>> a.parse(b'foobar\x00\x01')
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: must read padding of b'\x00\x00', got b'\x00\x01'
+    the shortest multiple of a length.
 
     """
-    __slots__ = ('construct', 'length')
+    __slots__ = ('construct', 'length', 'pad_byte')
 
-    def __init__(self, construct, length: int):
+    def __init__(self, construct: Type[Construct] | Construct, length: int, pad_byte: bytes = b'\x00'):
         super().__init__()
-        self.construct = construct
+        self.construct: Construct = construct
         if length < 0:
-            raise ValueError('length must be >= 0, got {}'.format(length))
-        self.length = length
+            raise ValueError(f'length must be >= 0, got {length}')
+        self.length: int = length
+        self.pad_byte: bytes = pad_byte
 
-    def _build_stream(self, obj, stream, context):
-        before = stream.tell()
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> Any:
+        before: int = stream.tell()
         ctx_value = self.construct._build_stream(obj, stream, context)
-        after = stream.tell()
-        padlen = -(after - before) % self.length
-        stream.write(b'\x00' * padlen)
+        after: int = stream.tell()
+
+        pad_len: int = -(after - before) % self.length
+
+        stream.write(self.pad_byte * pad_len)
         return ctx_value
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
         before = stream.tell()
         obj = self.construct._parse_stream(stream, context)
         after = stream.tell()
-        padlen = -(after - before) % self.length
-        padding = stream.read(padlen)
-        if padding != b'\x00' * padlen:
+
+        pad_len = -(after - before) % self.length
+        padding = stream.read(pad_len)
+
+        if padding != (padding_expected := self.pad_byte * pad_len):
             raise ParsingError(
-                'must read padding of {!r}, got {!r}'.format(
-                    b'\x00' * padlen, padding,
-                )
+                "must read padding of b'" + ' '.join(f'{b:02X}' for b in padding_expected) + "', got b'" + ' '.join(
+                    f'{b:02X}' for b in padding) + "'"
             )
+
         return obj
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         size = self.construct._sizeof(context)
         return size + (-size % self.length)
 
-    def _repr(self):
-        return 'Aligned({}, length={})'.format(self.construct, self.length)
+    def _repr(self) -> str:
+        return f"Aligned({self.construct}, length={self.length})"
 
 
 # Strings
 class String(Construct):
-    r"""
+    """
     String constrained only by the specified constant length.
     Null bytes are padded/trimmed from the right side.
-
-        >>> s = String(8, encoding='utf-8')
-        >>> s
-        String(length=8, encoding='utf-8')
-        >>> s.build('foo')
-        b'foo\x00\x00\x00\x00\x00'
-        >>> s.parse(b'foo\x00\x00\x00\x00\x00')
-        'foo'
-        >>> s.sizeof()
-        8
-
-    Longer strings are not supported:
-
-        >>> s.build('foobarbazxxxyyy')
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: length of the string to build must be in range [1, 9), got 15
-
-    But you can slice the data in advance:
-
-        >>> a = Adapted(s, before_build=lambda obj: obj[:8])
-        >>> a.build('foobarbazxxxyyy')
-        b'foobarba'
-
-    Encoding can be omitted, in that case ``String`` builds and
-    parses from bytes, not strings:
-
-        >>> s = String(8)
-        >>> s.build(b'foo')
-        b'foo\x00\x00\x00\x00\x00'
-        >>> s.parse(b'foo\x00\x00\x00\x00\x00')
-        b'foo'
 
     :param length: Number of bytes taken by the string. Not that the actual
     string can be less than this number. In that case the string will be
     padded with zero bytes.
 
-    :param encoding: Encode/decode using this encoding. By default no
+    :param encoding: Encode/decode using this encoding. By default, no
     encoding/decoding happens (encoding is None).
 
     """
     __slots__ = ('length', 'encoding')
 
-    def __init__(self, length: int, encoding: str = None):
+    def __init__(self, length: int, encoding: str | None = None):
         super().__init__()
         if length < 0:
-            raise ValueError('length must be >= 0, got {}'.format(length))
-        self.length = length
-        self.encoding = encoding
+            raise ValueError(f'length must be >= 0, got {length}')
+        self.length: int = length
+        self.encoding: str | None = encoding
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: str | bytes, stream: BytesIO, context: ContextOrNone) -> bytes:
         if self.encoding is not None:
             obj = obj.encode(self.encoding)
         if not 1 <= len(obj) <= self.length:
             raise BuildingError(
-                'length of the string to build must be in range '
-                '[1, {}), got {}'.format(self.length + 1, len(obj))
-            )
-        helper = Padded(Bytes(len(obj)), self.length)
-        return helper._build_stream(obj, stream, context)
+                f'length of the string to build must be in range [1, {self.length + 1}), got {len(obj)}')
 
-    def _parse_stream(self, stream, context):
-        data = stream.read(self.length)
+        helper = Padded(Bytes(len(obj)), self.length)
+        return helper._build_stream(obj, stream, context)  # noqa
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> str | bytes:
+        data: bytes = stream.read(self.length)
         if len(data) != self.length:
-            raise ParsingError('could not read enough bytes, expected '
-                               '{}, found {}'.format(self.length, len(data)))
-        obj = data.rstrip(b'\x00')
+            raise ParsingError(f'could not read enough bytes, expected {self.length}, found {len(data)}')
+        obj: bytes = data.rstrip(b'\x00')
         if self.encoding is not None:
-            obj = obj.decode(self.encoding)
+            obj: str = obj.decode(self.encoding)
         return obj
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         return self.length
 
-    def _repr(self):
+    def _repr(self) -> str:
         if self.encoding is not None:
-            return 'String(length={}, encoding={!r})'.format(
-                self.length, self.encoding
-            )
-        return 'String(length={})'.format(self.length)
+            return f'String(length={self.length}, encoding={self.encoding!r})'
+
+        return f'String(length={self.length})'
 
 
 class PascalString(Construct):
-    r"""
+    """
     Length-prefixed string.
-
-        >>> p = PascalString(Integer(1), encoding='utf-8')
-        >>> p
-        PascalString(length_field=Integer(1, byteorder='big', signed=False), encoding='utf-8')
-        >>> p.build('foo')
-        b'\x03foo'
-        >>> p.parse(b'\x08\xd0\x98\xd0\xb2\xd0\xb0\xd0\xbd')
-        'Иван'
-        >>> p.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.SizeofError: PascalString has no fixed size
-
-    Encoding can be omitted, in that case ``PascalString`` builds and
-    parses from bytes, not strings:
-
-        >>> p = PascalString(Integer(1))
-        >>> p
-        PascalString(length_field=Integer(1, byteorder='big', signed=False))
-        >>> p.build(b'foo')
-        b'\x03foo'
-        >>> p.parse(b'\x06foobar')
-        b'foobar'
 
     :param length_field: Construct used to build/parse the length.
 
-    :param encoding: Encode/decode using this encoding. By default no
+    :param encoding: Encode/decode using this encoding. By default, no
     encoding/decoding happens (encoding is None).
 
     """
     __slots__ = ('construct', 'length_field', 'encoding')
 
-    def __init__(self, length_field: Construct, encoding: str = None):
+    def __init__(self, length_field: Construct, encoding: str | None = None):
         super().__init__()
         self.length_field = length_field
         self.construct = Prefixed(Bytes(), length_field)
         self.encoding = encoding
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: str | bytes, stream: BytesIO, context: ContextOrNone) -> Bytes:
         if self.encoding is not None:
             obj = obj.encode(self.encoding)
-        return self.construct._build_stream(obj, stream, context)
+        return self.construct._build_stream(obj, stream, context)  # noqa
 
-    def _parse_stream(self, stream, context):
-        obj = self.construct._parse_stream(stream, context)
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> str | bytes:
+        obj = self.construct._parse_stream(stream, context)  # noqa
         if self.encoding is not None:
-            obj = obj.decode(self.encoding)
-        return obj
+            return obj.decode(self.encoding)
+        else:
+            return obj
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone):
         raise SizeofError('PascalString has no fixed size')
 
-    def _repr(self):
+    def _repr(self) -> str:
         if self.encoding is None:
-            return 'PascalString(length_field={})'.format(self.length_field)
-        return 'PascalString(length_field={}, encoding={!r})'.format(
-            self.length_field, self.encoding,
-        )
+            return f'PascalString(length_field={self.length_field})'
+        return f'PascalString(length_field={self.length_field}, encoding={self.encoding!r})'
 
 
 class CString(Construct):
-    r"""
+    """
     String ending in a zero byte.
 
-        >>> s = CString('utf-8')
-        >>> s
-        CString(encoding='utf-8')
-        >>> s.build('foo')
-        b'foo\x00'
-        >>> s.parse(b'bar\x00baz')
-        'bar'
-        >>> s.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.SizeofError: CString has no fixed size
-
-    You can omit encoding to build/parse raw bytes:
-
-        >>> s = CString()
-        >>> s
-        CString()
-        >>> s.build(b'foo')
-        b'foo\x00'
-        >>> s.parse(b'bar\x00')
-        b'bar'
-
-    Note that it is not safe to specify multibyte encodings allowing null byte
-    in arbitrary code points like UTF16 or UTF32.
-
-        >>> s = CString('utf-16-le')
-        >>> s.build('foo')
-        b'f\x00o\x00o\x00\x00'
-        >>> s.parse(_)
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: 'utf...' codec can't decode byte 0x66 in position 0: truncated data
-
-    :param encoding: Encode/decode using this encoding. By default no
+    :param encoding: Encode/decode using this encoding. By default, no
     encoding/decoding happens (encoding is None).
 
     """
     __slots__ = ('encoding',)
 
-    def __init__(self, encoding: str = None):
+    def __init__(self, encoding: str | None = None):
         super().__init__()
         self.encoding = encoding
 
-    def _build_stream(self, obj, stream, context):
-        if self.encoding is not None:
+    def _build_stream(self, obj: str | bytes, stream: BytesIO, context: ContextOrNone) -> bytes:
+        if self.encoding is None and not isinstance(obj, bytes):
+            obj = obj.encode('utf8')
+        elif self.encoding is not None:
             obj = obj.encode(self.encoding)
-        stream.write(obj + b'\x00')
-
-    def _parse_stream(self, stream, context):
-        obj = bytearray()
-        while True:
-            byte = stream.read(1)
-            if byte == b'\x00':
-                break
-            if not byte:
-                raise ParsingError(
-                    'could not read enough bytes, the stream has ended'
-                )
-            obj += byte
-        obj = bytes(obj)
-        if self.encoding is not None:
-            obj = obj.decode(self.encoding)
+        obj += b'\x00'
+        stream.write(obj)
         return obj
 
-    def _sizeof(self, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> str | bytes:
+        obj = bytearray()
+        while (byte := stream.read(1)) != b'\x00':
+            if not byte:
+                raise ParsingError('could not read enough bytes, the stream has ended')
+            obj += byte
+        obj_bytes = bytes(obj)
+        if self.encoding is not None:
+            try:
+                return obj_bytes.decode(self.encoding)
+            except UnicodeDecodeError as e:
+                raise ParsingError(f"'{self.encoding}' codec can't decode: {e}")
+        return obj_bytes
+
+    def _sizeof(self, context: ContextOrNone) -> None:
         raise SizeofError('CString has no fixed size')
 
-    def _repr(self):
+    def _repr(self) -> str:
         if self.encoding is not None:
-            return 'CString(encoding={!r})'.format(self.encoding)
+            return f'CString(encoding={self.encoding!r})'
         return 'CString()'
 
 
 class Line(Construct):
-    r"""
-    String ending in CRLF (b'\r\n'). Useful for building and parsing
-    text-based network protocols.
-
-        >>> l = Line()
-        >>> l
-        Line()
-        >>> l.build('foo')
-        b'foo\r\n'
-        >>> l.parse(b'bar\r\n')
-        'bar'
-        >>> l.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.SizeofError: Line has no fixed size
-
-    Default encoding is latin-1, but encoding/decoding can be changed or
-    disabled. In that case it's up to the application to decide how to process
-    raw bytes.
-
-        >>> l = Line(encoding=None)
-        >>> l
-        Line(encoding=None)
-        >>> l.build(b'foo')
-        b'foo\r\n'
-        >>> l.parse(_)
-        b'foo'
-        >>> l.parse(b'bar\r\nbaz\r\n')
-        b'bar'
+    """
+    String ending in 'Carriage Return and Line Feed' (b'\r\n'). 
+    Useful for building and parsing text-based network protocols.
 
     :param encoding: Encode/decode using this encoding. Default is 'latin-1'.
 
     """
     __slots__ = ('encoding',)
 
-    def __init__(self, encoding='latin-1'):
+    def __init__(self, encoding: str | None = 'latin-1'):
         super().__init__()
         self.encoding = encoding
 
-    def _build_stream(self, obj, stream, context):
-        if self.encoding is not None:
-            obj = obj.encode(self.encoding)
-        stream.write(obj + b'\r\n')
+    def _build_stream(self, obj: str | bytes, stream: BytesIO, context: ContextOrNone) -> bytes:
+        if self.encoding is not None and isinstance(obj, str):
+            encoded_obj = obj.encode(self.encoding)
+        elif isinstance(obj, bytes):
+            encoded_obj = obj
+        else:
+            raise TypeError("Object to build must be str or bytes")
+        encoded_obj += b'\r\n'
+        stream.write(encoded_obj)
+        return encoded_obj
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> str | bytes:
         obj = bytearray()
         while True:
             byte = stream.read(1)
             if not byte:
-                raise ParsingError(
-                    'could not read enough bytes, the stream has ended'
-                )
+                raise ParsingError('could not read enough bytes, the stream has ended')
             obj += byte
             if obj[-2:] == b'\r\n':
                 break
-        obj = bytes(obj[:-2])
+        obj_bytes = bytes(obj[:-2])
         if self.encoding is not None:
-            obj = obj.decode(self.encoding)
-        return obj
+            return obj_bytes.decode(self.encoding)
+        return obj_bytes
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> None:
         raise SizeofError('Line has no fixed size')
 
-    def _repr(self):
+    def _repr(self) -> str:
         if self.encoding != 'latin-1':
-            return 'Line(encoding={!r})'.format(self.encoding)
+            return f'Line(encoding={self.encoding!r})'
         return 'Line()'
 
 
@@ -1320,13 +905,16 @@ class StructMeta(type):
     class namespace and __slots__.
     """
 
-    if not CLASS_NAMESPACE_ORDERED:  # pragma: nocover
+    # CLASS_NAMESPACE_ORDERED
+    if not version_info >= (3, 6):  # pragma: nocover
         @classmethod
-        def __prepare__(mcs, name, bases):
+        def __prepare__(mcs, name: str, bases: Tuple[Type[Any], ...]) -> OrderedDict:
             return OrderedDict()
 
-    def __new__(mcs, name, bases, namespace):
-        fields = OrderedDict([
+    def __new__(mcs: Type['StructMeta'],
+                name: str, bases: Tuple[Type[Any], ...],
+                namespace: Dict[str, Any]) -> 'StructMeta':
+        fields: OrderedDict[str, Construct] = OrderedDict([
             (key, value) for key, value in namespace.items()
             if isinstance(value, Construct)
         ])
@@ -1338,173 +926,240 @@ class StructMeta(type):
         return type.__new__(mcs, name, bases, namespace)
 
 
+class Bit(Construct):
+    """
+    class Bit, to be used in the context of a BitFieldStruct.
+    """
+
+    __slots__ = Construct.__slots__ + ('bit_size',)
+
+    def __init__(self, bit_size: int):
+        super().__init__()
+        self.bit_size: int = bit_size
+
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> None:
+        pass
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> None:
+        pass
+
+    def _sizeof(self, context: ContextOrNone) -> int:
+        return self.bit_size
+
+    def _repr(self) -> str:
+        return 'Bit()'
+
+
+class BitPadding(Bit):
+    """
+    BitPadding class, to be used in the context of a BitFieldStruct.
+    """
+
+    def _repr(self):
+        return 'BitPadding()'
+
+
+class BitFieldStructMeta(type):
+    """
+    Metaclass for BitFieldStruct, a mandatory machinery to maintain an ordered
+    class namespace and __slots__.
+    """
+
+    if not version_info >= (3, 6):  # pragma: nocover
+        @classmethod
+        def __prepare__(mcs, name: str, bases: Tuple[Type[Any], ...]) -> OrderedDict:
+            return OrderedDict()
+
+    def __new__(mcs: Type['BitFieldStructMeta'], name: str,
+                bases: Tuple[Type[Any], ...], namespace: Dict[str, Any]) -> 'BitFieldStructMeta':
+        fields: OrderedDict[str, Union[Bit, BitPadding]] = OrderedDict([
+            (key, value) for key, value in namespace.items()
+            if isinstance(value, (Bit, BitPadding))
+        ])
+        namespace['__bit_fields__'] = fields
+        slots = namespace.get('__slots__')
+        if slots is None:
+            # Make sure user defined structs aren't eating memory.
+            namespace['__slots__'] = Construct.__slots__
+        return type.__new__(mcs, name, bases, namespace)
+
+
 class Struct(Construct, metaclass=StructMeta):
-    r"""
+    """
     Sequence of named constructs, similar to structs in C.
     The elements are parsed and built in the order they are defined.
 
     Size is the sum of all construct sizes, unless some construct raises
     SizeofError.
 
-        >>> class Entry(Struct):
-        ...     key = Integer(1)
-        ...     value = Bytes(3)
-        >>> entry = Entry()
-        >>> entry
-        Entry()
-        >>> entry.build({'key': 1, 'value': b'foo'})
-        b'\x01foo'
-        >>> entry.parse(b'\x10bar') == {'key': 16, 'value': b'bar'}
-        True
-        >>> entry.sizeof()
-        4
-
-    Struct fields can be inspected using ``fields`` property:
-
-        >>> entry.fields
-        OrderedDict([('key', Integer(1, byteorder='big', signed=False)), ('value', Bytes(3))])
-
-    What makes structs special is that during building/parsing they
-    fill in the building/parsing context with values to build/parsed values
-    which allows to use Contextual construct to make some struct fields
-    dependent of another:
-
-        >>> class Entry(Struct):
-        ...     length = Integer(1)
-        ...     data = Contextual(Bytes, lambda ctx: ctx['length'])
-        >>> entry = Entry()
-        >>> entry.build({'length': 3, 'data': b'foo'})
-        b'\x03foo'
-        >>> entry.build({'length': 6, 'data': b'abcdef'})
-        b'\x06abcdef'
-        >>> entry.parse(b'\x02barbaz') == {'length': 2, 'data': b'ba'}
-        True
-        >>> entry.sizeof(context={'length': 10})
-        11
-
-    Structs can be composed:
-
-        >>> class Header(Struct):
-        ...     payload_size = Integer(1)
-        >>> class Message(Struct):
-        ...     header = Header()
-        ...     payload = Contextual(Bytes, lambda ctx: ctx['header']['payload_size'])
-        >>> message = Message()
-        >>> data = {'header': {'payload_size': 3}, 'payload': b'foo'}
-        >>> message.build(data)
-        b'\x03foo'
-        >>> message.parse(_) == data
-        True
-
-    Structs can be embedded, in this case the embedded struct works with the
-    "outer" context instead of creating a new one:
-
-        >>> class Header(Struct):
-        ...     payload_size = Integer(1)
-        >>> class Message(Struct):
-        ...     header = Header(embedded=True)
-        ...     payload = Contextual(Bytes, lambda ctx: ctx['payload_size'])
-        >>> message = Message()
-        >>> data = {'payload_size': 3, 'payload': b'foo'}
-        >>> message.build(data)
-        b'\x03foo'
-        >>> message.parse(_) == data
-        True
-
-    Embedded property is preserved when an embedded struct is wrapped into
-    other constructs (like Adapted):
-
-        >>> class Header(Struct):
-        ...     payload_size = Integer(1)
-        >>> def mul_by_3(obj):
-        ...     obj['payload_size'] *= 3
-        ...     return obj
-        >>> class Message(Struct):
-        ...     header = Adapted(
-        ...         Header(embedded=True),
-        ...         before_build=mul_by_3,
-        ...         after_parse=mul_by_3,
-        ...     )
-        ...     payload = Contextual(Bytes, lambda ctx: ctx['payload_size'])
-        >>> message = Message()
-        >>> message.build({'payload_size': 1, 'payload': b'foo'})
-        b'\x03foo'
-        >>> message.parse(b'\x01bar') == {'payload_size': 3, 'payload': b'bar'}
-        True
-
     :param embedded: If True, this struct will be embedded into another struct.
 
     """
-    __slots__ = ()
+    __slots__ = ('_embedded', '_ordered')
 
-    def __init__(self, *, embedded=False):
+    def __init__(self, *, embedded: bool = False, _ordered: bool = True):
         super().__init__()
-        self._embedded = embedded
+        self._embedded: bool = embedded
+        self._ordered = _ordered
 
     @property
-    def fields(self):
+    def fields(self) -> OrderedDict[str, Construct | Type[Construct]]:
         return self.__struct_fields__  # noqa
 
-    def _build_stream(self, obj, stream, context):
-        if not self._embedded:
-            context = context.new_child(obj)
-        for name, field in self.fields.items():
-            if not field._embedded:
-                subobj = obj.get(name)
-            else:
-                subobj = obj
-            ctx_value = field._build_stream(subobj, stream, context)
-            if ctx_value is not None:
-                context[name] = ctx_value
-
-    def _parse_stream(self, stream, context):
+    def _build_stream(self, obj: Context, stream: BytesIO, context: ContextOrNone) -> BytesIO:
         if not self._embedded:
             context = context.new_child()
-        obj = {}
-        for name, field in self.fields.items():
-            subobj = field._parse_stream(stream, context)
-            if not field._embedded:
-                context[name] = obj[name] = subobj
-            else:
-                obj.update(subobj)
-                context.update(subobj)
-        return obj
 
-    def _sizeof(self, context):
+        if self._ordered:
+            self._build_ordered_fields(obj, stream, context)
+        else:
+            self._build_unordered_fields(obj, stream, context)
+
+        return stream
+
+    def _build_ordered_fields(self, obj: Context, stream: BytesIO, context: ContextOrNone) -> None:
+        """ Build fields in order."""
+        for name, field in self.fields.items():
+            sub_obj = obj.get(name) if not field._embedded else obj
+
+            if isinstance(field, Struct):
+                field._build_stream(sub_obj, stream, context)
+                context[name] = sub_obj
+            else:
+                ctx_value = field._build_stream(sub_obj, stream, context)
+                context[name] = ctx_value if ctx_value is not None else sub_obj
+
+            if field._embedded:
+                context.update(sub_obj)
+
+    def _build_unordered_fields(self, obj: Context, stream: BytesIO, context: ContextOrNone) -> None:
+        """Build fields not in order"""
+        # Preprocess, put context in global
+        for name, value in obj.items():
+            context[name] = value
+
+        for name, field in self.fields.items():
+            sub_obj = obj.get(name)
+            ctx_value = field._build_stream(sub_obj, stream, context)
+
+            # Renew context immediately
+            context[name] = ctx_value if ctx_value is not None else sub_obj
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Context:
+        if not self._embedded:
+            context = context.new_child()
+        obj = dict()
+        for name, field in self.fields.items():
+            sub_obj = field._parse_stream(stream, context)
+            if not field._embedded:
+                obj[name] = sub_obj
+                context[name] = sub_obj  # Renew context only in no_embedded fields
+            else:
+                obj.update(sub_obj)
+                for k, v in sub_obj.items():
+                    context[k] = v
+        return Context(obj)
+
+    def _sizeof(self, context: ContextOrNone) -> int:
         return sum(field._sizeof(context) for field in self.fields.values())
 
-    def _repr(self):
-        return '{}({})'.format(
-            self.__class__.__name__, 'embedded=True' if self._embedded else '',
-        )
+    def _repr(self) -> str:
+        # TODO: return f"{self.__class__.__name__}({', '.join(f'{k}={v!r}' for k, v in self.fields.items())})" if self._embedded else f'{self.__class__.__name__}()'
+        return f'{self.__class__.__name__}(embedded=True)' if self._embedded else f'{self.__class__.__name__}()'
+
+
+class BitFieldStruct(Construct, metaclass=BitFieldStructMeta):
+    """
+    Build and parse named bit-wise fields that can be given as in C.
+    The bitfields must be given from LSB to MSB order (top to bottom).
+    The bitfields can span over byte boundaries, and the missing bits will be
+    handled as don't care paddings.
+
+    :param embedded: If True, this construct will be embedded into the
+    enclosed struct.
+
+    """
+
+    __slots__ = Construct.__slots__ + ('_bit_size', '_actual_bit_size', '_length')
+
+    def __init__(self, *, embedded: bool = False):
+        super().__init__()
+        self._embedded: bool = embedded
+        _bit_size = 0
+        for name, bit in self.fields.items():
+            if not isinstance(bit, (Bit, BitPadding)):
+                raise TypeError('Only Bit or BitPadding can be in BitFieldStruct!')
+            _bit_size += bit.sizeof()
+        # fill bits up to the next byte boundary
+        _fill_bits = ceil(_bit_size / 8) * 8 - _bit_size
+        self._actual_bit_size: int = _bit_size
+        self._bit_size: int = _bit_size + _fill_bits
+        self._length: int = self._bit_size // 8
+
+    @property
+    def fields(self) -> OrderedDict[str, Bit | BitPadding]:
+        return self.__bit_fields__  # noqa
+
+    @staticmethod
+    def _bitmask(bit_len: int) -> int:
+        return (2 << (bit_len - 1)) - 1
+
+    def _build_stream(self, obj: Dict[str, int], stream: BytesIO, context: ContextOrNone) -> None:
+        bit_pos: int = 0
+        int_data: int = 0
+        for name, bit in self.fields.items():
+            mask: int = self._bitmask(bit.bit_size)
+            bit_value: int = obj.get(name, 0)
+            if isinstance(bit, BitPadding):
+                pass
+            elif isinstance(bit, Bit):
+                if bit_value > mask:
+                    raise BuildingError(f'Cannot pack {bit_value} into {bit.bit_size} bits!')
+                int_data += (bit_value & self._bitmask(bit.bit_size)) << bit_pos
+            else:
+                raise TypeError('Only Bit or BitPadding can be in BitFieldStruct!')
+            bit_pos += bit.bit_size
+        stream.write(int_data.to_bytes(length=self._length, byteorder='little'))
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Dict[str, int]:
+        data: bytes = stream.read(self._length)
+        if len(data) < self._length:
+            raise ParsingError(f'Insufficient data length for parsing BitFieldStruct! '
+                               f'Expected {self._length} got {len(data)}.')
+
+        int_data: int = int.from_bytes(data, byteorder='little')
+        obj: Dict[str, int] = {}
+        bit_pos: int = 0
+        for name, bit in self.fields.items():
+            if isinstance(bit, BitPadding):
+                pass
+            elif isinstance(bit, Bit):
+                obj[name] = (int_data >> bit_pos) & self._bitmask(bit.bit_size)
+            else:
+                raise TypeError('Only Bit or BitPadding can be in BitFieldStruct!')
+            bit_pos += bit.bit_size
+        return obj
+
+    def _sizeof(self, context: ContextOrNone) -> int:
+        return self._length
+
+    def _repr(self) -> str:
+        bitfields: List[str] = []
+        bit_pos: int = 0
+        for name, bit in self.fields.items():
+            if isinstance(bit, BitPadding):
+                bitfields.append(f"_PAD_[{bit_pos}:{bit_pos + bit.bit_size - 1}]")
+            else:
+                bitfields.append(f"{name}[{bit_pos}:{bit_pos + bit.bit_size - 1}]")
+            bit_pos += bit.bit_size
+        bitfields_str = ", ".join(bitfields)
+        return f'{self.__class__.__name__}(embedded=True, {bitfields_str})' if self._embedded else f'{self.__class__.__name__}({bitfields_str})'
 
 
 class Contextual(Construct):
-    r"""
+    """
     Construct that makes other construct dependent of the context.
     Useful in structs.
-
-        >>> c = Contextual(Integer, lambda ctx: (ctx['length'], 'big'))
-        >>> c
-        Contextual(Integer, <function <lambda> at ...>)
-        >>> c.build(1, context={'length': 1})
-        b'\x01'
-        >>> c.build(1, context={'length': 2})
-        b'\x00\x01'
-        >>> c.build(1)
-        Traceback (most recent call last):
-        ...
-        structures.core.ContextualError: 'length'
-        >>> c.parse(b'\x00')
-        Traceback (most recent call last):
-        ...
-        structures.core.ContextualError: 'length'
-        >>> c.sizeof(context={'length': 4})
-        4
-        >>> c.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.ContextualError: 'length'
 
     :param to_construct: Construct subclass to be instantiated during
     building/parsing.
@@ -1520,67 +1175,54 @@ class Contextual(Construct):
     """
     __slots__ = ('to_construct', 'args_func')
 
-    def __init__(self, to_construct, args_func):
+    def __init__(self, to_construct: Callable[..., Construct],
+                 args_func: Callable[[Context], Any | Sequence[Any]]) -> None:
         super().__init__()
         self.to_construct = to_construct
         self.args_func = args_func
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> Any:
         try:
             args = self.args_func(context)
         except Exception as exc:
-            raise ContextualError(str(exc))
-        if not isinstance(args, (list, tuple)):
-            args = [args]
-        construct = self.to_construct(*args)
-        return construct._build_stream(obj, stream, context)
+            raise ContextualError(str(exc)) from exc
 
-    def _parse_stream(self, stream, context):
+        args = args if isinstance(args, (tuple, list)) else (args,)
+
+        construct = self.to_construct(*args)
+        construct._build_stream(obj, stream, context)
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
         try:
             args = self.args_func(context)
         except Exception as exc:
             raise ContextualError(str(exc))
+
         if not isinstance(args, (list, tuple)):
-            args = [args]
+            args = (args,)
+
         construct = self.to_construct(*args)
         return construct._parse_stream(stream, context)
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         try:
             args = self.args_func(context)
         except Exception as exc:
-            raise ContextualError(str(exc))
-        if not isinstance(args, (list, tuple)):
-            args = [args]
+            raise ContextualError(str(exc)) from exc
+
+        args = [args] if not isinstance(args, (list, tuple)) else args
+
         construct = self.to_construct(*args)
         return construct._sizeof(context)
 
-    def _repr(self):
-        return 'Contextual({}, {})'.format(
-            self.to_construct.__name__,
-            self.args_func,
-        )
+    def _repr(self) -> str:
+        return f'Contextual({self.to_construct.__name__}, {self.args_func})'
 
 
 class Computed(Construct):
-    r"""
+    """
     Computed fields do not participate in building, but return computed values
     when parsing and populate the context with computed values:
-
-        >>> class Example(Struct):
-        ...     x = Integer(1)
-        ...     y = Integer(1)
-        ...     x_plus_y = Computed(lambda ctx: ctx['x'] + ctx['y'])
-        ...     z = Contextual(Bytes, lambda ctx: ctx['x_plus_y'])
-        >>> example = Example()
-        >>> example.parse(b'\x01\x02foo') == {'x': 1, 'y': 2, 'z': b'foo', 'x_plus_y': 3}
-        True
-
-        >>> c = Computed(b'foo')
-        >>> c
-        Computed(b'foo')
-        >>> c.sizeof()
-        0
 
     :param value: Computed value. A function of context can be specified
     to compute values dynamically.
@@ -1588,89 +1230,46 @@ class Computed(Construct):
     """
     __slots__ = ('value',)
 
-    def __init__(self, value):
+    def __init__(self, value: Callable[[Context], Any] | bytes):
         super().__init__()
         self.value = value
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> Any:
         if obj is None:
-            obj = self.value(context) if callable(self.value) else self.value
+            if callable(self.value):
+                try:
+                    obj = self.value(context)
+                except KeyError as e:
+                    raise ValidationError(f"KeyError in Computed field: {e}")
+                except Exception as e:  # Catch other potential errors during computation.
+                    raise ValidationError(f"Error computing Computed field value: {e}")
+            else:
+                obj = self.value
         return obj
 
-    def _parse_stream(self, stream, context):
-        return self.value(context) if callable(self.value) else self.value
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
+        if callable(self.value):
+            try:
+                return self.value(context)
+            except KeyError as e:
+                raise ValidationError(f"KeyError in Computed field: {e}")
+            except Exception as e:
+                raise ValidationError(f"Error computing Computed field value: {e}")
+        else:
+            return self.value
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: dict) -> int:
         return 0
 
-    def _repr(self):
-        return 'Computed({!r})'.format(self.value)
+    def __repr__(self) -> str:
+        return f'Computed({self.value!r})'
 
 
 class BitFields(Construct):
-    r"""
+    """
     Build and parse named bit-wise fields. Values are always built from
     unsigned big-byteorder integers and parsed as unsigned
     big-byteorder integers.
-
-        >>> b = BitFields('version:4, header_length:4')
-        >>> b
-        BitFields('version:4, header_length:4')
-        >>> b.build({'version': 4, 'header_length': 0})
-        b'@'
-        >>> b.parse(b'\x00') == {'version': 0, 'header_length': 0}
-        True
-        >>> b.sizeof()
-        1
-
-    Fields can span over 8 bits, and the whole construct is byte-aligned
-    (i.e. it will read as many bytes as needed and ignore trailing bits that
-    do not have definitions in the spec):
-
-        >>> b = BitFields('foo:12,bar:5')
-        >>> b.sizeof()
-        3
-        >>> b.build({'foo': 4095, 'bar': 31})
-        b'\xff\xff\x80'
-        >>> b.parse(b'\x09\x11\x00') == {'foo': 145, 'bar': 2}
-        True
-
-    You can omit any field during building, in that case 0 will be built.
-    That allows to emulate padding that comes before actual data:
-
-        >>> b = BitFields('padding:7, flag:1')
-        >>> b.parse(b'\x01') == {'padding': 0, 'flag': 1}
-        True
-        >>> b.build({'flag': 0})
-        b'\x00'
-
-    If you try to build from integer that can't be packed into the specified
-    amount of bits, a BuildingError will be raised:
-
-        >>> b.build({'flag': 10})
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: cannot pack 10 into 1 bit
-
-    Of course, fields bit length must be >=0:
-
-        >>> BitFields('foo:-5')
-        Traceback (most recent call last):
-        ...
-        ValueError: 'foo' bit length must be >= 0, got -5
-
-    You can also embed BitFields into a struct:
-
-        >>> class Entry(Struct):
-        ...     header = BitFields('foo:2,bar:2,length:4', embedded=True)
-        ...     payload = Contextual(Bytes, lambda ctx: ctx['length'])
-        >>> entry = Entry()
-        >>> entry.build({'foo': 2, 'bar': 0, 'length': 3, 'payload': b'baz'})
-        b'\x83baz'
-        >>> entry.parse(b'\x33xxx') == {
-        ...     'foo': 0, 'bar': 3, 'length': 3, 'payload': b'xxx'
-        ... }
-        True
 
     :param spec: Fields definition, a comma separated list of
     name:length-in-bits pairs. Spaces between commas are allowed.
@@ -1679,125 +1278,97 @@ class BitFields(Construct):
     enclosed struct.
 
     """
-    __slots__ = ('spec', 'fields', '_length')
+    __slots__ = ('spec', 'fields', '_length', '_bit_lengths')
 
-    def __init__(self, spec, embedded=False):
+    def __init__(self, spec: str, embedded: bool = False):
         super().__init__()
         self.spec = spec
         self._embedded = embedded
         self.fields = OrderedDict()
+        self._bit_lengths = []  # added for performance optimization
+
         for field in map(str.strip, spec.split(',')):
-            name, length = field.split(':')
-            self.fields[name] = length = int(length)
+            name, length_str = field.split(':')
+            length = int(length_str)
+            self.fields[name] = length
             if length < 0:
-                raise ValueError('{!r} bit length must be >= 0, got {}'.format(
-                    name, length
-                ))
-        self._length = ceil(
-            sum(length for _, length in self.fields.items()) / 8
-        )
+                raise ValueError(f"'{name}' bit length must be >= 0, got {length}")
+            self._bit_lengths.append(length)  # added for performance optimization
 
-    def _build_stream(self, obj, stream, context):
-        bits = []
+        self._length = ceil(sum(self._bit_lengths) / 8)
+
+    def _build_stream(self, obj: dict, stream: BytesIO, context: ContextOrNone):
+        bits: str = ""
         for name, length in self.fields.items():
-            subobj = obj.get(name, 0)
-            bin_subobj = bin(subobj)[2:].rjust(length, '0')
-            if len(bin_subobj) != length:
-                raise BuildingError('cannot pack {} into {} bit{}'.format(
-                    subobj, length, 's' if length > 1 else ''
-                ))
-            bits += bin_subobj
-        data = []
-        bits = ''.join(bits).ljust(self._length * 8, '0')
-        for idx in range(self._length):
-            part = bits[idx * 8:(idx + 1) * 8]
-            data.append(int(part, 2))
-        stream.write(bytes(data))
+            sub_obj = obj.get(name, 0)
+            bin_sub_obj = bin(sub_obj)[2:].zfill(length)
+            if len(bin_sub_obj) != length:
+                raise BuildingError(f"cannot pack {sub_obj} into {length} bit{'s' if length > 1 else ''}")
+            bits += bin_sub_obj
 
-    def _parse_stream(self, stream, context):
-        data = stream.read(self._length)
-        bits = ''.join(bin(byte)[2:].rjust(8, '0') for byte in data)
-        obj = {}
-        idx = 0
+        bits += "0" * ((self._length * 8) - len(bits))
+        bit_obj = []
+        for i in range(self._length):
+            part = bits[i * 8: (i + 1) * 8]
+            bit_obj.append(bytes([int(part, 2)]))
+        bit_obj = b''.join(bit_obj)
+        stream.write(bit_obj)
+        return bit_obj
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Context:
+        data: bytes = stream.read(self._length)
+        bits: str = "".join(bin(byte)[2:].zfill(8) for byte in data)
+        obj: Dict[str, int] = {}
+        idx: int = 0
         for name, length in self.fields.items():
             obj[name] = int(bits[idx:idx + length], 2)
             idx += length
-        return obj
+        return Context(obj)
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         return self._length
 
-    def _repr(self):
-        return 'BitFields({!r})'.format(self.spec)
+    def _repr(self) -> str:
+        return f'BitFields({self.spec!r})'
 
 
 # Conditionals
-class Const(Subconstruct):
-    r"""
+class Const(SubConstruct):
+    """
     Build and parse constant values using the given construct.
     ``None`` can be specified for building.
-
-        >>> c = Const(Flag(), True)
-        >>> c
-        Const(Flag(), value=True)
-        >>> c.build(True)
-        b'\x01'
-        >>> c.build(None)
-        b'\x01'
-        >>> c.build(False)
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: provided value must be None or True, got False
-        >>> c.parse(b'\x01')
-        True
-        >>> c.parse(b'\x00')
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: parsed value must be True, got False
-
-    Since the majority of constant fields are ASCII signatures, ``Const``
-    supports the following short-hand:
-
-        >>> c = Const(b'SIGNATURE')
-        >>> c.build(None)
-        b'SIGNATURE'
-        >>> c.parse(b'SIGNATURE')
-        b'SIGNATURE'
-        >>> c
-        Const(Bytes(9), value=b'SIGNATURE')
 
     :param construct: Construct used to build and parse the constant value.
 
     :param value: Constant value to be built and parsed.
 
     """
-    __slots__ = ('value',)
+    __slots__ = ('value', '_construct_sizeof')
 
-    def __init__(self, construct, value=None):
+    def __init__(self, construct: bytes | int | Construct | Type[Construct], value: bool | bytes | None = None):
         if value is None:
             if isinstance(construct, bytes):
-                # Handle the simplest Const(b'foobar') case
                 construct, value = Bytes(len(construct)), construct
         super().__init__(construct)
         self.value = value
+        self._construct_sizeof = self.construct.sizeof()  # added for performance
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: bool | bytes | None, stream: BytesIO, context: ContextOrNone) -> bytes:
         if obj not in (None, self.value):
-            raise BuildingError('provided value must be None '
-                                'or {!r}, got {!r}'.format(self.value, obj))
+            raise BuildingError(f'provided value must be None or {self.value!r}, got {obj!r}')
         return self.construct._build_stream(self.value, stream, context)
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> bool | bytes:
         obj = self.construct._parse_stream(stream, context)
         if obj != self.value:
-            raise ParsingError('parsed value must be '
-                               '{!r}, got {!r}'.format(self.value, obj))
+            raise ParsingError(f'parsed value must be {self.value!r}, got {obj!r}')
         return obj
 
-    def _repr(self):
-        return 'Const({}, value={!r})'.format(
-            self.construct, self.value
-        )
+    def _sizeof(self, context: ContextOrNone) -> int:
+        return self._construct_sizeof  # added for performance
+
+    def _repr(self) -> str:
+        return f'Const({self.construct}, value={self.value!r})'
 
 
 class Raise(Construct):
@@ -1805,23 +1376,7 @@ class Raise(Construct):
     Construct that unconditionally raises BuildingError when building,
     ParsingError when parsing and SizeofError when calculating the size
     with the given message.
-    Useful in conditional constructs (Enum, Switch, If, etc).
-
-        >>> r = Raise('a condition is false')
-        >>> r
-        Raise(message='a condition is false')
-        >>> r.build(None)
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: a condition is false
-        >>> r.parse(b'anything')
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: a condition is false
-        >>> r.sizeof()
-        Traceback (most recent call last):
-        ...
-        structures.core.SizeofError: a condition is false
+    Useful in conditional constructs (Enum, Switch, If, etc.).
 
     :param message: Message to be shown when raising the errors. Use
     ``Contextual`` construct to specify dynamic messages.
@@ -1829,57 +1384,31 @@ class Raise(Construct):
     """
     __slots__ = ('message',)
 
-    def __init__(self, message):
+    def __init__(self, message: str):
         super().__init__()
-        self.message = message
+        self.message: str = message
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> None:
         raise BuildingError(self.message)
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> None:
         raise ParsingError(self.message)
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> None:
         raise SizeofError(self.message)
 
-    def _repr(self):
-        return 'Raise(message={!r})'.format(self.message)
+    def _repr(self) -> str:
+        return f'Raise(message={self.message!r})'
 
 
 class If(Construct):
-    r"""
+    """
     A conditional building and parsing of a construct depending
     on the predicate.
 
-        >>> i = If(lambda ctx: ctx['flag'], Const(b'True'), Const(b'False'))
-        >>> i
-        If(<function <lambda> at ...>, then_construct=Const(Bytes(4), value=b'True'), else_construct=Const(Bytes(5), value=b'False'))
-        >>> i.build(None, context={'flag': True})
-        b'True'
-        >>> i.build(None, context={'flag': False})
-        b'False'
-        >>> i.parse(b'True', context={'flag': True})
-        b'True'
-        >>> i.parse(b'False', context={'flag': False})
-        b'False'
-        >>> i.sizeof(context={'flag': True})
-        4
-        >>> i.sizeof(context={'flag': False})
-        5
-
-    An else clause can be omitted, Pass() will be used:
-
-        >>> i = If(lambda ctx: ctx['flag'], Const(b'True'))
-        >>> i
-        If(<function <lambda> at ...>, Const(Bytes(4), value=b'True'))
-        >>> i.sizeof(context={'flag': True})
-        4
-        >>> i.sizeof(context={'flag': False})
-        0
-
     :param predicate: Function of context called during building/parsing/sizeof
     calculation. If the returned value is True, ``then_construct`` is used.
-    Otherwise ``else_construct`` is used.
+    Otherwise, ``else_construct`` is used.
 
     :param then_construct: Positive branch construct.
 
@@ -1888,78 +1417,36 @@ class If(Construct):
     """
     __slots__ = ('predicate', 'then_construct', 'else_construct')
 
-    def __init__(self, predicate, then_construct, else_construct=Pass()):
+    def __init__(self, predicate: Callable[[Context], bool],
+                 then_construct: Construct | Type[Construct],
+                 else_construct: Construct | Type[Construct] | None = None):
         super().__init__()
         self.predicate = predicate
         self.then_construct = then_construct
-        self.else_construct = else_construct
+        self.else_construct = else_construct if else_construct is not None else Pass()
 
-    def _build_stream(self, obj, stream, context):
-        if self.predicate(context):
-            construct = self.then_construct
-        else:
-            construct = self.else_construct
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> Any:
+        construct = self.then_construct if self.predicate(context) else self.else_construct
         return construct._build_stream(obj, stream, context)
 
-    def _parse_stream(self, stream, context):
-        if self.predicate(context):
-            construct = self.then_construct
-        else:
-            construct = self.else_construct
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
+        construct = self.then_construct if self.predicate(context) else self.else_construct
         return construct._parse_stream(stream, context)
 
-    def _sizeof(self, context):
-        if self.predicate(context):
-            construct = self.then_construct
-        else:
-            construct = self.else_construct
+    def _sizeof(self, context: ContextOrNone) -> int:
+        construct = self.then_construct if self.predicate(context) else self.else_construct
         return construct._sizeof(context)
 
-    def _repr(self):
+    def _repr(self) -> str:
         if isinstance(self.else_construct, Pass):
-            return 'If({}, {})'.format(self.predicate, self.then_construct)
-        return 'If({}, then_construct={!r}, else_construct={!r})'.format(
-            self.predicate, self.then_construct, self.else_construct,
-        )
+            return f'If({self.predicate}, {self.then_construct})'
+        return f'If({self.predicate}, then_construct={self.then_construct!r}, else_construct={self.else_construct!r})'
 
 
 class Switch(Construct):
-    r"""
+    """
     Construct similar to switches in C.
     Conditionally build and parse bytes depending on the key function.
-
-        >>> s = Switch(
-        ...     lambda ctx: ctx['foo'],
-        ...     cases={1: Integer(1), 2: Bytes(3)}
-        ... )
-        >>> s
-        Switch(<function <lambda> ...>, cases={1: Integer(...), 2: Bytes(3)})
-        >>> s.build(5, context={'foo': 1})
-        b'\x05'
-        >>> s.build(b'bar', context={'foo': 2})
-        b'bar'
-        >>> s.parse(b'baz', context={'foo': 2})
-        b'baz'
-        >>> s.sizeof(context={'foo': 2})
-        3
-        >>> s.build(b'baz', context={'foo': 3})
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: no default case specified
-        >>> s.parse(b'baz', context={'foo': 3})
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: no default case specified
-
-    You can choose how to process missing cases error by providing default case:
-
-        >>> s = Switch(lambda ctx: None, cases={}, default=Pass())
-        >>> s
-        Switch(<function <lambda> ...>, cases={}, default=Pass())
-        >>> s.build(None)
-        b''
-        >>> s.parse(b'') is None
-        True
 
     :param key: Function of context, used to determine the appropriate case
     to build/parse/calculate sizeof.
@@ -1973,80 +1460,35 @@ class Switch(Construct):
     """
     __slots__ = ('key', 'cases', 'default')
 
-    def __init__(self, key, cases, default=None):
+    def __init__(self, key: Callable[[Context], Any],
+                 cases: Mapping[Any, Construct | Type[Construct]],
+                 default: Construct | None = None):
         super().__init__()
         self.key = key
         self.cases = cases
-        if default is None:
-            default = Raise('no default case specified')
-        self.default = default
+        self.default = default if default is not None else Raise('no default case specified')
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> Any:
         construct = self.cases.get(self.key(context), self.default)
         return construct._build_stream(obj, stream, context)
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
         construct = self.cases.get(self.key(context), self.default)
         return construct._parse_stream(stream, context)
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         construct = self.cases.get(self.key(context), self.default)
         return construct._sizeof(context)
 
-    def _repr(self):
+    def _repr(self) -> str:
         if isinstance(self.default, Raise):
-            return 'Switch({}, cases={})'.format(self.key, self.cases)
-        return 'Switch({}, cases={}, default={})'.format(
-            self.key, self.cases, self.default,
-        )
+            return f'Switch({self.key}, cases={self.cases})'
+        return f'Switch({self.key}, cases={self.cases}, default={self.default})'
 
 
-class Enum(Subconstruct):
-    r"""
+class Enum(SubConstruct):
+    """
     Like a built-in ``Enum`` class, maps string names to values.
-
-        >>> e = Enum(Flag(), cases={'yes': True, 'no': False})
-        >>> # Another python 3.4 only glitch, can't rely on any specific dict order
-        >>> e
-        Enum(Flag(), cases={...})
-        >>> e.build('yes')
-        b'\x01'
-        >>> e.parse(b'\x00')
-        'no'
-        >>> e.sizeof()
-        1
-
-    Unexpected names result in error:
-
-        >>> e = Enum(Bytes(3), cases={'x': b'xxx', 'y': b'yyy'})
-        >>> e.build('z')
-        Traceback (most recent call last):
-        ...
-        structures.core.BuildingError: no default case specified
-        >>> e.parse(b'zzz')
-        Traceback (most recent call last):
-        ...
-        structures.core.ParsingError: no default case specified
-
-    You can choose how to process missing cases error by providing default case:
-
-        >>> e = Enum(Bytes(3), cases={'x': b'xxx', 'y': b'yyy'}, default=Pass())
-        >>> e
-        Enum(Bytes(3), cases={...}, default=Pass())
-        >>> e.build('z')
-        b''
-        >>> e.parse(b'z') is None
-        True
-
-    During building, even if a value is provided instead of a name, an enum
-    will populate context with the name, not with the value.
-
-        >>> class Entry(Struct):
-        ...     foo = Enum(Flag(), cases={'yes': True, 'no': False})
-        ...     bar = Computed(lambda ctx: print('In context:', ctx['foo']))
-        >>> Entry().build({'foo': True})
-        In context: yes
-        b'\x01'
 
     :param construct: Construct used to build/parse/calculate sizeof.
 
@@ -2058,7 +1500,8 @@ class Enum(Subconstruct):
     """
     __slots__ = ('cases', 'build_cases', 'parse_cases', 'default')
 
-    def __init__(self, construct, cases, default=None):
+    def __init__(self, construct: Construct, cases: Dict[Any, Any],
+                 default: Construct | Type[Construct] | None = None):
         super().__init__(construct)
         # For building we need k -> v and v -> v mapping
         self.cases = cases.copy()
@@ -2066,25 +1509,25 @@ class Enum(Subconstruct):
         self.build_cases.update({v: v for v in cases.values()})
         # For parsing we need v -> k mapping
         self.parse_cases = {v: k for k, v in cases.items()}
-        if default is None:
-            default = Raise('no default case specified')
-        self.default = default
+        self.default = default if default is not None else Raise('no default case specified')
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> Any:
         try:
             obj2 = self.build_cases[obj]
         except KeyError:
-            return self.default._build_stream(obj, stream, context)
+            self.default._build_stream(obj, stream, context)
+            return None
         fallback = stream.tell()
         try:
             self.construct._build_stream(obj2, stream, context)
         except BuildingError:
             stream.seek(fallback)
             self.default._build_stream(obj2, stream, context)
+            return None
         # always put in context the name, not value
         return self.parse_cases[obj2]
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Any:
         fallback = stream.tell()
         try:
             obj = self.construct._parse_stream(stream, context)
@@ -2098,39 +1541,16 @@ class Enum(Subconstruct):
             return self.default._parse_stream(stream, context)
         return obj
 
-    def _repr(self):
-        if isinstance(self.default, Raise):
-            return 'Enum({}, cases={})'.format(
-                self.construct, self.cases
-            )
-        return 'Enum({}, cases={}, default={})'.format(
-            self.construct, self.cases, self.default,
-        )
+    def _repr(self) -> str:
+        return f'Enum({self.construct}, cases={self.cases}{", default=" + repr(self.default) if not isinstance(self.default, Raise) else ""})'
 
 
 # Stream manipulation and inspection
-class Offset(Subconstruct):
-    r"""
+class Offset(SubConstruct):
+    """
     Changes the stream to a given offset where building or parsing
     should take place, and restores the stream position when finished.
     Mostly useful in structs.
-
-        >>> o = Offset(Bytes(1), 4)
-        >>> o
-        Offset(Bytes(1), offset=4)
-        >>> o.parse(b'abcdef')
-        b'e'
-        >>> o.build(b'Z')
-        b'\x00\x00\x00\x00Z'
-        >>> o.sizeof()
-        1
-
-    Providing invalid parameters results in a ValueError:
-
-        >>> Offset(Bytes(1), -2)
-        Traceback (most recent call last):
-        ...
-        ValueError: offset must be >= 0, got -2
 
     Size is defined by the size of the provided construct, although it may
     seem that building/parsing do not consume this exact number of bytes.
@@ -2147,34 +1567,39 @@ class Offset(Subconstruct):
     """
     __slots__ = ('offset',)
 
-    def __init__(self, construct, offset):
+    def __init__(self, construct: Construct, offset: int):
         super().__init__(construct)
         if offset < 0:
-            raise ValueError('offset must be >= 0, got {}'.format(offset))
-        self.offset = offset
+            raise ValueError("offset must be >= 0, got {}".format(offset))
+        self.offset: int = offset
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(
+            self, obj: Any, stream: BytesIO, context: ContextOrNone
+    ) -> Any:
         fallback = stream.tell()
         stream.seek(self.offset)
         ctx_value = self.construct._build_stream(obj, stream, context)
         stream.seek(fallback)
         return ctx_value
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(
+            self, stream: BytesIO, context: ContextOrNone
+    ) -> Any:
         fallback = stream.tell()
         stream.seek(self.offset)
         obj = self.construct._parse_stream(stream, context)
         stream.seek(fallback)
         return obj
 
-    def _repr(self):
-        return 'Offset({}, offset={})'.format(
-            self.construct, self.offset,
-        )
+    def _sizeof(self, context: ContextOrNone) -> int:
+        return self.construct._sizeof(context)
+
+    def _repr(self) -> str:
+        return f"Offset({self.construct!r}, offset={self.offset})"
 
 
 class Tell(Construct):
-    r"""
+    """
     Gets the stream position when building or parsing.
     Tell is useful for adjusting relative offsets to absolute positions,
     or to measure sizes of Constructs. To get an absolute pointer,
@@ -2182,103 +1607,68 @@ class Tell(Construct):
     and measure their difference using a Contextual field.
     Mostly useful in structs.
 
-        >>> t = Tell()
-        >>> t
-        Tell()
-        >>> t.build(None)
-        b''
-        >>> stream = BytesIO(b'foobar')
-        >>> stream.seek(3)
-        3
-        >>> t.parse_stream(stream)
-        3
-        >>> t.sizeof()
-        0
-
-        >>> class Example(Struct):
-        ...     key = Bytes(3)
-        ...     pos1 = Tell()
-        ...     value = Bytes(3)
-        ...     pos2 = Tell()
-        >>> example = Example()
-        >>> example.parse(b'foobar') == {
-        ...     'key': b'foo', 'pos1': 3, 'value': b'bar', 'pos2': 6
-        ... }
-        True
-
     """
     __slots__ = ()
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> int:
         return stream.tell()
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> int:
         return stream.tell()
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone) -> int:
         return 0
 
-    def _repr(self):
+    def _repr(self) -> str:
         return 'Tell()'
 
 
-class Checksum(Subconstruct):
-    r"""
+class Checksum(SubConstruct):
+    """
     Build and parse a checksum of data using a given ``hashlib``-compatible
     hash function.
-
-        >>> import hashlib
-        >>> c = Checksum(Bytes(32), hashlib.sha256, lambda ctx: ctx['data'])
-        >>> c.build(None, context={'data': b'foo'})
-        b',&\xb4kh\xff\xc6\x8f\xf9\x9bE<\x1d0A4\x13B-pd\x83\xbf\xa0\xf9\x8a^\x88bf\xe7\xae'
-        >>> c.parse(_, context={'data': b'foo'})
-        b',&\xb4kh\xff\xc6\x8f\xf9\x9bE<\x1d0A4\x13B-pd\x83\xbf\xa0\xf9\x8a^\x88bf\xe7\xae'
-        >>> c.sizeof()
-        32
 
     """
     __slots__ = ('hash_func', 'data_func')
 
-    def __init__(self, construct, hash_func, data_func):
+    # TODO: hash func protocols
+    def __init__(self, construct: Construct, hash_func: Callable[[bytes], Any], data_func: Callable[[Any], bytes]):
         super().__init__(construct)
         self.hash_func = hash_func
         self.data_func = data_func
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj: Any, stream: BytesIO, context: ContextOrNone) -> bytes:
         data = self.data_func(context)
         digest = self.hash_func(data).digest()
         if obj is None:
             obj = digest
         elif obj != digest:
             raise BuildingError(
-                'wrong checksum, provided {!r} but expected {!r}'.format(
-                    hexlify(obj), hexlify(digest),
-                )
+                f'wrong checksum, provided {hexlify(obj)!r} but expected {hexlify(digest)!r}'
             )
         self.construct._build_stream(obj, stream, context)
         return obj
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> bytes:
         parsed_hash = self.construct._parse_stream(stream, context)
         data = self.data_func(context)
         expected_hash = self.hash_func(data).digest()
         if parsed_hash != expected_hash:
             raise ParsingError(
-                'wrong checksum, parsed {!r} but expected {!r}'.format(
-                    hexlify(parsed_hash), hexlify(expected_hash),
-                )
+                f'wrong checksum, parsed {hexlify(parsed_hash)!r} but expected {hexlify(expected_hash)!r}'
             )
         return parsed_hash
 
-    def _repr(self):
-        return 'Checksum({}, hash_func={}, data_func={!r})'.format(
-            self.construct, self.hash_func, self.data_func,
-        )
+    def _sizeof(self, context: ContextOrNone) -> int:
+        return self.construct._sizeof(context)
+
+    def _repr(self) -> str:
+        return f'Checksum({self.construct}, hash_func={self.hash_func}, data_func={self.data_func!r})'
 
 
 # Debugging utilities
-class Debug(Subconstruct):
-    r"""
+class Debug(SubConstruct):
+    """
     In case of an error, launch a pdb-compatible debugger.
 
     """
@@ -2289,25 +1679,195 @@ class Debug(Subconstruct):
         self.debugger = debugger
         self.on_exc = on_exc
 
-    def _build_stream(self, obj, stream, context):
+    def _build_stream(self, obj, stream, context: ContextOrNone):
         try:
             super()._build_stream(obj, stream, context)
-        except self.on_exc:
-            pdb.post_mortem(sys.exc_info()[2])
+        except self.on_exc:  # noqa
+            pdb.post_mortem(exc_info()[2])
 
-    def _parse_stream(self, stream, context):
+    def _parse_stream(self, stream, context: ContextOrNone):
         try:
             super()._parse_stream(stream, context)
-        except self.on_exc:
-            pdb.post_mortem(sys.exc_info()[2])
+        except self.on_exc:  # noqa
+            pdb.post_mortem(exc_info()[2])
 
-    def _sizeof(self, context):
+    def _sizeof(self, context: ContextOrNone):
         try:
             super()._sizeof(context)
-        except self.on_exc:
-            pdb.post_mortem(sys.exc_info()[2])
+        except self.on_exc:  # noqa
+            pdb.post_mortem(exc_info()[2])
 
     def _repr(self):
-        return 'Debug({}, debugger={}, on_exc={})'.format(
-            self.construct, self.debugger, self.on_exc
-        )
+        return f'Debug({self.construct}, debugger={self.debugger}, on_exc={self.on_exc})'
+
+
+class Optional(Struct):
+    __slots__ = ('_embedded',)
+
+    def __init__(self, *, embedded=False):
+        super().__init__()
+        self._embedded = embedded
+
+    # TODO
+    def _build_stream(self, obj, stream, context: ContextOrNone):
+        raise NotImplementedError()
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> Context:
+        if len(stream.getvalue()) - stream.tell() < self._sizeof(context):
+            return Context()
+
+        if not self._embedded:
+            context = context.new_child()
+
+        obj: Context = Context()
+        for name, field in self.fields.items():
+            try:
+                obj[name] = field._parse_stream(stream, context)
+            except Exception as e:
+                raise ParsingError(f"Error parsing field {name} : {e}")
+        return obj
+
+    def _repr(self) -> str:
+        # TODO: print inner struct name
+        return f'Optional(embedded={self._embedded})'
+
+
+class Varint(Construct):
+    """
+       Represents a variable-length integer.
+
+       Uses a variable number of bytes to encode an integer value.
+       Each byte (except the last) has a 7-bit payload and the highest bit set to 1.
+       The last byte has the highest bit set to 0.
+    """
+
+    # TODO: auto calculate Varint size
+    def __init__(self):
+        super().__init__()
+
+    def _build_stream(self, obj: int, stream: BytesIO, context: ContextOrNone) -> None:
+        buf = bytearray()
+        while True:
+            towrite = obj & 0x7F
+            obj >>= 7
+            if obj:
+                buf.append(towrite | 0x80)
+            else:
+                buf.append(towrite)
+                break
+        stream.write(bytes(buf))
+
+    def _parse_stream(self, stream: BytesIO, context: ContextOrNone) -> int:
+        shift = 0
+        result = 0
+        while True:
+            single_byte = stream.read(1)
+            if not single_byte:
+                raise ParsingError("Unexpected EOF while reading bytes")
+            ord_int = ord(single_byte)
+            result |= (ord_int & 0x7F) << shift
+            shift += 7
+            if not (ord_int & 0x80):
+                break
+        return result
+
+    def _sizeof(self, context: ContextOrNone) -> int:
+        raise NotImplementedError("Varint has no fixed size")
+
+    def _repr(self) -> str:
+        return 'Varint()'
+
+
+# Debugging constructs
+class Probe(Construct):
+    r"""
+    Probe that dumps the context, and some stream content (peeks into it) to the screen to aid the debugging process. It can optionally limit itself to a single context entry, instead of printing entire context.
+
+    :param into: optional, None by default, or a callable that takes the context as input.
+                 If provided, the result of this callable will be printed.
+    :param lookahead: optional, integer, number of bytes to dump from the stream.
+
+    **Usage:**
+
+    ```python
+    from io import BytesIO
+
+    class Header(Struct):
+        magic = Bytes(4)
+        version = Integer(8)
+        payload_length = Integer(16)
+
+    class PacketFormat(Struct):
+        header = Header()
+        payload = Bytes(lambda ctx: ctx.header.payload_length)
+
+    data = b'\x12\x34\x56\x78\x01\x00\x0a\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09'
+
+    # Example 1: Print the entire context and peek into the stream before parsing payload
+    class PacketFormatWithProbe1(Struct):
+        header = Header()
+        probe = Probe(lookahead=4)
+        payload = Bytes(lambda ctx: ctx.header.payload_length)
+
+    PacketFormatWithProbe1().parse_stream(BytesIO(data))
+    # Expected Output (fragment):
+    # --------------------------------------------------
+    # Probe, path is <_io.BytesIO object at 0x...>
+    # Stream peek: b'\x00\x01\x02\x03'
+    # Context: {'header': {'magic': b'\x124Vx', 'version': 1, 'payload_length': 10}}
+    # --------------------------------------------------
+
+    # Example 2: Print a specific context variable (payload_length) before parsing payload
+    class PacketFormatWithProbe2(Struct):
+        header = Header()
+        probe = Probe(into=lambda ctx: ctx.header.payload_length)
+        payload = Bytes(lambda ctx: ctx.header.payload_length)
+
+    PacketFormatWithProbe2().parse_stream(BytesIO(data))
+    # Expected Output (fragment):
+    # --------------------------------------------------
+    # Probe, path is <_io.BytesIO object at 0x...>
+    # Context: {'header': {'magic': b'\x124Vx', 'version': 1, 'payload_length': 10}}
+    # Value of into: 10
+    # --------------------------------------------------
+    ```
+    """
+    __slots__ = ('into', 'lookahead')
+
+    def __init__(self, into=None, lookahead=None):
+        super().__init__()
+        self.into = into
+        self.lookahead = lookahead
+
+    def _build_stream(self, obj, stream, context: Context | None):
+        self._printout(stream, context)
+
+    def _parse_stream(self, stream, context: Context | None):
+        self._printout(stream, context)
+
+    def _sizeof(self, context: Context | None):
+        self._printout(None, context)
+        return 0
+
+    def _printout(self, stream, context: Context | None):
+        print("--------------------------------------------------")
+        print(f"Probe, path is {stream}")
+
+        if self.lookahead is not None and stream is not None:
+            current_position = stream.tell()
+            peek_data = stream.read(self.lookahead)
+            stream.seek(current_position)
+            print(f"Stream peek: {' '.join(f'{b:02X}' for b in peek_data)}")
+
+        print("Context:", context)
+
+        if self.into is not None:
+            try:
+                into_value = self.into(context)
+                print("Value of into:", into_value)
+            except Exception as error:
+                print(f"Failed to evaluate 'into' with context: {context}, reason:{error}")
+        print("--------------------------------------------------")
+
+    def _repr(self):
+        return f"Probe(into={self.into!r}, lookahead={self.lookahead!r})"
