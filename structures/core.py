@@ -52,7 +52,7 @@ class Construct:
         * _repr(self)
 
     """
-    __slots__ = ('_embedded',)  # 使用 __slots__ 节省内存
+    __slots__ = ('_embedded',)
 
     def __init__(self):
         self._embedded = False
@@ -86,7 +86,7 @@ class Construct:
         :param stream: A ``io.BytesIO`` instance to write bytes into.
         :param context: Optional context dictionary.
         """
-        context = context if isinstance(context, Context) else Context(context or {})  # 简化 Context 创建
+        context = context if isinstance(context, Context) else Context(context or {})
         try:
             self._build_stream(obj, stream, context)
         except Error:
@@ -101,7 +101,7 @@ class Construct:
         :param stream: Stream from which the data is read and parsed.
         :param context: Optional context dictionary.
         """
-        context = context if isinstance(context, Context) else Context(context or {})  # 简化 Context 创建
+        context = context if isinstance(context, Context) else Context(context or {})
         try:
             return self._parse_stream(stream, context)
         except Error:
@@ -115,7 +115,7 @@ class Construct:
 
         :param context: Optional context dictionary.
         """
-        context = context if isinstance(context, Context) else Context(context or {})  # 简化 Context 创建
+        context = context if isinstance(context, Context) else Context(context or {})
         try:
             return self._sizeof(context)
         except Exception as exc:
@@ -169,7 +169,7 @@ class SubConstruct(Construct):
     def __init__(self, construct):
         super().__init__()
         self.construct = construct
-        self._embedded = construct._embedded  # 直接赋值，避免重复判断
+        self._embedded = construct._embedded
 
     def _build_stream(self, obj, stream, context):
         return self.construct._build_stream(obj, stream, context)
