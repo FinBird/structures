@@ -6,10 +6,13 @@ from binascii import hexlify
 from struct import pack, unpack
 from collections import ChainMap, OrderedDict, Sequence
 
+from error import *
+
+
 __version__ = '0.9.5'
 
 __all__ = ['Construct', 'Subconstruct', 'Context', 'Error',
-           'BuildingError', 'ParsingError', 'SizeofError', 'ContextualError',
+           'BuildingError', 'ParsingError', 'SizeofError', 'ContextualError', 'ValidationError',
            'Pass', 'Flag', 'Bytes', 'Integer', 'Float', 'Padding',
            'Repeat', 'RepeatExactly', 'Adapted', 'Prefixed', 'Padded',
            'Aligned', 'String', 'PascalString', 'CString',
@@ -186,36 +189,6 @@ class Context(ChainMap):
     Special object that tracks building/parsing process, contains relevant
     values to build and already parsed values: fields parameters can depend
     of them via a contextual function instead of being statically defined.
-    """
-
-
-class Error(Exception):
-    """
-    Generic error, base class for all library errors.
-    """
-
-
-class BuildingError(Error):
-    """
-    Raises when building fails.
-    """
-
-
-class ParsingError(Error):
-    """
-    Raises when parsing fails.
-    """
-
-
-class SizeofError(Error):
-    """
-    Raises when sizeof fails.
-    """
-
-
-class ContextualError(Error):
-    """
-    Raises when a contextual function fails.
     """
 
 
