@@ -16,7 +16,7 @@ if version_info >= (3, 6):
 else:
     from collections import ChainMap, OrderedDict
 
-__version__ = '0.9.5'
+__version__ = '0.9.6'
 
 __all__ = [
     'Construct', 'SubConstruct', 'Context', 'Error',
