@@ -1102,22 +1102,23 @@ class BitFieldStruct(Construct, metaclass=BitFieldStructMeta):
 
     @staticmethod
     def _bitmask(bit_len: int) -> int:
-        return (2 << (bit_len - 1)) - 1
+        return (1 << bit_len) - 1
 
     def _build_stream(self, obj: Dict[str, int], stream: BytesIO, context: ContextOrNone) -> None:
-        bit_pos: int = 0
         int_data: int = 0
+        bit_pos: int = 0
         for name, bit in self.fields.items():
-            mask: int = self._bitmask(bit.bit_size)
-            bit_value: int = obj.get(name, 0)
-            if isinstance(bit, BitPadding):
-                pass
-            elif isinstance(bit, Bit):
-                if bit_value > mask:
-                    raise BuildingError(f'Cannot pack {bit_value} into {bit.bit_size} bits!')
-                int_data += (bit_value & self._bitmask(bit.bit_size)) << bit_pos
-            else:
-                raise TypeError('Only Bit or BitPadding can be in BitFieldStruct!')
+            match type(bit).__name__:  # !Hack:isinstance
+                case 'Bit':
+                    bit_value: int = obj.get(name, 0)
+                    mask: int = self._bitmask(bit.bit_size)
+                    if bit_value > mask:
+                        raise BuildingError(f'Cannot pack {bit_value} into {bit.bit_size} bits!')
+                    int_data |= (bit_value & mask) << bit_pos
+                case 'BitPadding':
+                    pass
+                case _:
+                    raise TypeError('Only Bit or BitPadding can be in BitFieldStruct!')
             bit_pos += bit.bit_size
         stream.write(int_data.to_bytes(length=self._length, byteorder='little'))
 
@@ -1131,12 +1132,15 @@ class BitFieldStruct(Construct, metaclass=BitFieldStructMeta):
         obj: Dict[str, int] = {}
         bit_pos: int = 0
         for name, bit in self.fields.items():
-            if isinstance(bit, BitPadding):
-                pass
-            elif isinstance(bit, Bit):
-                obj[name] = (int_data >> bit_pos) & self._bitmask(bit.bit_size)
-            else:
-                raise TypeError('Only Bit or BitPadding can be in BitFieldStruct!')
+            match type(bit).__name__:  # !Hack:isinstance
+                case 'BitPadding':
+                    pass
+                case 'Bit':
+                    if name != '_':
+                        mask: int = self._bitmask(bit.bit_size)
+                        obj[name] = (int_data >> bit_pos) & mask
+                case _:
+                    raise TypeError('Only Bit or BitPadding can be in BitFieldStruct!')
             bit_pos += bit.bit_size
         return obj
 
